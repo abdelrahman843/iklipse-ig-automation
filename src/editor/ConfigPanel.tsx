@@ -8,6 +8,7 @@ import { PostPicker } from "./PostPicker";
 import { TRIGGERS, triggerMeta } from "../lib/triggers";
 import { toast } from "../components/Toast";
 import { ImageField } from "../components/ImageField";
+import { LINK_IN_TEXT_HINT, linkInText, SHORTENED_LINK_HINT, shortenedLink, weakPublicReply, weakReplySet } from "../lib/spamHints";
 import type { FlowNodeData, TriggerNodeData } from "./adapter";
 import type { ActionKind, FlowAction, FlowNode, InputType, MessageButton, TriggerConfig, TriggerType } from "../lib/types";
 
@@ -87,6 +88,11 @@ function UrlHint({ url, httpsOnly = false }: { url?: string; httpsOnly?: boolean
       {httpsOnly ? "Start the link with https://" : "Start the link with https:// or http://"} — Instagram rejects other links.
     </span>
   );
+}
+
+/** Warns when a link the contact will tap goes through a URL shortener. */
+function ShortLinkHint({ url }: { url?: string }) {
+  return shortenedLink(url) ? <span className="mono field-warn">{SHORTENED_LINK_HINT}</span> : null;
 }
 
 /**
@@ -276,16 +282,20 @@ function CommentReplyFields({ cfg, onConfig }: { cfg: TriggerConfig; onConfig: (
         <div className="stack" style={{ gap: 6 }}>
           <span className="mono">Posted publicly under the comment, alongside the DM. One is picked at random.</span>
           {replies.map((r, i) => (
-            <div className="button-row" key={i}>
-              <input
-                className="input"
-                placeholder="Sent! Check your DMs 📩"
-                value={r}
-                onChange={(e) => set(replies.map((x, j) => (i === j ? e.target.value : x)))}
-              />
-              <button className="btn btn-quiet" onClick={() => set(replies.filter((_, j) => j !== i))}>Remove</button>
+            <div key={i}>
+              <div className="button-row">
+                <input
+                  className="input"
+                  placeholder="Sent! Check your DMs for the details 📩"
+                  value={r}
+                  onChange={(e) => set(replies.map((x, j) => (i === j ? e.target.value : x)))}
+                />
+                <button className="btn btn-quiet" onClick={() => set(replies.filter((_, j) => j !== i))}>Remove</button>
+              </div>
+              {weakPublicReply(r) && <span className="mono field-warn">{weakPublicReply(r)}</span>}
             </div>
           ))}
+          {weakReplySet(replies) && <span className="mono field-warn">{weakReplySet(replies)}</span>}
           <div><button className="btn btn-quiet" onClick={() => set([...replies, ""])}>Add reply</button></div>
         </div>
       )}
@@ -407,6 +417,7 @@ function SendMessageFields({ node, onChange }: { node: FlowNode; onChange: (patc
           placeholder="What the contact reads"
           onChange={(e) => setContent({ text: e.target.value })}
         />
+        {linkInText(content.text) && <span className="mono field-warn">{LINK_IN_TEXT_HINT}</span>}
       </div>
       <div>
         <label className="label">Image (optional)</label>
@@ -428,6 +439,7 @@ function SendMessageFields({ node, onChange }: { node: FlowNode; onChange: (patc
               <button className="btn btn-quiet" onClick={() => setButtons(buttons.filter((_, j) => j !== i))}>Remove</button>
             </div>
             <UrlHint url={button.url} />
+            <ShortLinkHint url={button.url} />
           </Fragment>
         ))}
         <div>
@@ -483,6 +495,7 @@ function SendMessageFields({ node, onChange }: { node: FlowNode; onChange: (patc
                     <button className="btn btn-quiet" onClick={() => setCardBtns(cardBtns.filter((_, j) => j !== bi))} aria-label="Remove button">×</button>
                   </div>
                   <UrlHint url={b.url} />
+                  <ShortLinkHint url={b.url} />
                 </Fragment>
               ))}
               <div><button className="btn btn-quiet" disabled={cardBtns.length >= 3} onClick={() => setCardBtns([...cardBtns, { title: "Open", payload: "OPEN" }])}>Add card button</button></div>
@@ -499,9 +512,12 @@ function SendMessageFields({ node, onChange }: { node: FlowNode; onChange: (patc
         <span className="label" style={{ marginBottom: 0 }}>More bubbles</span>
         <span className="mono">Each is sent as its own message, in order, after the one above.</span>
         {extras.map((ex, i) => (
-          <div key={i} className="button-row">
-            <textarea className="textarea" style={{ minHeight: 40 }} placeholder={`Bubble ${i + 2}`} value={ex.text ?? ""} onChange={(e) => onChange({ extras: extras.map((x, j) => (i === j ? { ...x, text: e.target.value } : x)) })} />
-            <button className="btn btn-quiet" onClick={() => onChange({ extras: extras.filter((_, j) => j !== i) })}>Remove</button>
+          <div key={i}>
+            <div className="button-row">
+              <textarea className="textarea" style={{ minHeight: 40 }} placeholder={`Bubble ${i + 2}`} value={ex.text ?? ""} onChange={(e) => onChange({ extras: extras.map((x, j) => (i === j ? { ...x, text: e.target.value } : x)) })} />
+              <button className="btn btn-quiet" onClick={() => onChange({ extras: extras.filter((_, j) => j !== i) })}>Remove</button>
+            </div>
+            {linkInText(ex.text) && <span className="mono field-warn">{LINK_IN_TEXT_HINT}</span>}
           </div>
         ))}
         <div>

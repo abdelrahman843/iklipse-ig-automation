@@ -27,6 +27,14 @@ const HTTP_MAX_BYTES = 256 * 1024;
 const SKIP_PAYLOAD = "__SKIP__";
 // An answer under a comment hours later reads as a bot catching up; past this it is dropped.
 const PUBLIC_REPLY_TTL_MS = 2 * 60 * 60 * 1000;
+// A person answering a comment takes a moment; an answer in the same second reads as a bot
+// (Manychat suggests a short Smart Delay before the first message). Random within these ranges.
+const PRIVATE_REPLY_PAUSE_MS: [number, number] = [10_000, 45_000];
+const PUBLIC_REPLY_PAUSE_MS: [number, number] = [30_000, 120_000];
+
+function after([min, max]: [number, number]): string {
+  return new Date(Date.now() + min + Math.random() * (max - min)).toISOString();
+}
 
 let queued = 0; // sends enqueued during this invocation, so we know whether to wake the sender
 
@@ -242,6 +250,8 @@ async function enqueue(
       kind === "private_reply"
         ? new Date(commentAt + replyTtl).toISOString()
         : new Date(windowEnds).toISOString(),
+    // A live comment is answered at once: the reply is only valid while the broadcast runs.
+    ...(kind === "private_reply" && !run.state?.live ? { next_attempt_at: after(PRIVATE_REPLY_PAUSE_MS) } : {}),
   });
   if (error) throw new Error(`send_queue insert failed: ${error.message}`);
   queued++;
@@ -1028,6 +1038,7 @@ async function queuePublicReply(flow: Row, contact: Row, runId: string, commentI
     send_type: "public_reply",
     comment_id: commentId,
     payload: { text: lines[Math.floor(Math.random() * lines.length)] },
+    next_attempt_at: after(PUBLIC_REPLY_PAUSE_MS),
     expires_at: new Date(Date.now() + PUBLIC_REPLY_TTL_MS).toISOString(),
   });
   if (error) console.error("public reply insert failed:", error.message);

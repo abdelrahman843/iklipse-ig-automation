@@ -3,6 +3,7 @@ import { blankBlock, blockKind, type Block, type BlockKind } from "../lib/conten
 import type { MessageButton, MessageCard } from "../lib/types";
 import { ImageField } from "./ImageField";
 import { PhonePreview } from "./PhonePreview";
+import { LINK_IN_TEXT_HINT, linkInText, SHORTENED_LINK_HINT, shortenedLink } from "../lib/spamHints";
 
 const KINDS: { kind: BlockKind; name: string; hint: string; icon: ReactNode }[] = [
   {
@@ -164,6 +165,7 @@ function BlockEditor({ block, onChange, disabled }: { block: Block; onChange: (b
         />
         <span className={`counted-n ${len > limit ? "is-over" : ""}`}>{limit - len}</span>
       </div>
+      {linkInText(block.text) && <span className="mono field-warn">{LINK_IN_TEXT_HINT}</span>}
       <Buttons buttons={block.buttons ?? []} onChange={(buttons) => onChange({ ...block, buttons })} disabled={disabled} />
     </div>
   );
@@ -175,12 +177,15 @@ function Buttons({ buttons, onChange, disabled }: { buttons: MessageButton[]; on
   return (
     <div className="stack" style={{ gap: 6 }}>
       {buttons.map((b, i) => (
-        <div key={i} className="btn-edit">
-          <input className="input" placeholder="Button title" maxLength={20} value={b.title} disabled={disabled} onChange={(e) => set(i, { title: e.target.value })} />
-          <input className="input" placeholder="https://…" value={b.url ?? ""} disabled={disabled} onChange={(e) => set(i, { url: e.target.value })} />
-          {!disabled && (
-            <button type="button" className="icon-btn" onClick={() => onChange(buttons.filter((_, j) => j !== i))} aria-label="Remove button">×</button>
-          )}
+        <div key={i}>
+          <div className="btn-edit">
+            <input className="input" placeholder="Button title" maxLength={20} value={b.title} disabled={disabled} onChange={(e) => set(i, { title: e.target.value })} />
+            <input className="input" placeholder="https://…" value={b.url ?? ""} disabled={disabled} onChange={(e) => set(i, { url: e.target.value })} />
+            {!disabled && (
+              <button type="button" className="icon-btn" onClick={() => onChange(buttons.filter((_, j) => j !== i))} aria-label="Remove button">×</button>
+            )}
+          </div>
+          {shortenedLink(b.url) && <span className="mono field-warn">{SHORTENED_LINK_HINT}</span>}
         </div>
       ))}
       {!disabled && buttons.length < 3 && (

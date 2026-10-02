@@ -265,6 +265,7 @@ function SendingSafety() {
           `Replies under comments: ${l.public_reply.minute} a minute, ${l.public_reply.hour} an hour. ` +
           `Broadcasts and sequences: ${l.proactive.hour} an hour. ` +
           `Any one contact: ${l.per_contact_hour} messages an hour. ` +
+          "The DM to a commenter waits 10–45 seconds and the reply under the comment 30–120 seconds, as a person would. " +
           "Anything over a limit waits for the next minute rather than going out in a burst."
         }
       >
