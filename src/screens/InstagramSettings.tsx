@@ -6,7 +6,8 @@ import { friendlyError, toast } from "../components/Toast";
 import { FlowPicker } from "../components/FlowPicker";
 import { PhonePreview } from "../components/PhonePreview";
 import { Crumbs, Toggle } from "../components/PageBits";
-import { InstagramConnection } from "../components/InstagramConnection";
+import { callOauth, InstagramConnection } from "../components/InstagramConnection";
+import { clockTime, relativeTime } from "../lib/time";
 import {
   createFlow,
   FLOW_PAYLOAD,
@@ -172,7 +173,111 @@ export function InstagramSettings() {
           "Runs when someone mentions your account in their story, so you can thank them or send something back.",
         )}
       </div>
+
+      <SendingSafety />
     </>
+  );
+}
+
+interface Limit {
+  minute: number;
+  hour: number;
+}
+
+interface Health {
+  paused_until: string | null;
+  pause_reason: string | null;
+  public_paused_until: string | null;
+  public_pause_reason: string | null;
+  last_event_at: string | null;
+  sent_last_hour: number;
+  limits: {
+    reactive: Limit;
+    private_reply: Limit;
+    public_reply: Limit;
+    proactive: Limit;
+    per_contact_hour: number;
+    viral_comments_hour: number;
+    viral_pause_hours: number;
+  };
+}
+
+/**
+ * The limits that keep the account clear of Meta's spam checks (send_guard, migration 24), and
+ * whether anything is holding sends back right now. Read-only: the limits are set server-side.
+ */
+function SendingSafety() {
+  const [health, setHealth] = useState<Health | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    supabase.rpc("sending_health").then(({ data, error }) => {
+      if (error) setError(friendlyError(error));
+      else setHealth(data as Health);
+    });
+  }, []);
+
+  async function resubscribe() {
+    setBusy(true);
+    try {
+      await callOauth("resubscribe");
+      toast.success("Instagram events resubscribed");
+    } catch (err) {
+      toast.error(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (error) return <div className="notice">Could not load sending safety: {error}</div>;
+  if (!health) return null;
+  const l = health.limits;
+
+  return (
+    <div className="mc-card settings-list">
+      <SettingRow
+        title="Sending"
+        status={health.paused_until ? `Paused until ${clockTime(health.paused_until)}` : `Normal · ${health.sent_last_hour} sent in the last hour`}
+        about={
+          health.paused_until
+            ? `${health.pause_reason ?? "Meta pushed back"}. Every automated send waits until then and goes out after; nothing is lost unless its time runs out first.`
+            : "If Meta ever answers with a rate limit or a block, every automated send stops on its own instead of retrying into it."
+        }
+      >
+        <span className={`dot ${health.paused_until ? "" : "is-on"}`} />
+      </SettingRow>
+      <SettingRow
+        title="Replies under comments"
+        status={health.public_paused_until ? `Off until ${clockTime(health.public_paused_until)}` : "On"}
+        about={
+          health.public_paused_until
+            ? `${health.public_pause_reason ?? "Too many comments at once"}, so public replies are off while the post is busy. The DMs to commenters still go out.`
+            : `Turns itself off for ${l.viral_pause_hours} hours when more than ${l.viral_comments_hour} comments start automations within an hour, the moment a post goes viral.`
+        }
+      >
+        <span className={`dot ${health.public_paused_until ? "" : "is-on"}`} />
+      </SettingRow>
+      <SettingRow
+        title="Speed limits"
+        about={
+          `DMs to commenters: ${l.private_reply.minute} a minute. ` +
+          `Replies under comments: ${l.public_reply.minute} a minute, ${l.public_reply.hour} an hour. ` +
+          `Broadcasts and sequences: ${l.proactive.hour} an hour. ` +
+          `Any one contact: ${l.per_contact_hour} messages an hour. ` +
+          "Anything over a limit waits for the next minute rather than going out in a burst."
+        }
+      >
+        <span className="mono">Set by the server</span>
+      </SettingRow>
+      <SettingRow
+        title="Events from Instagram"
+        status={`Last received ${relativeTime(health.last_event_at)}`}
+        about="Instagram stops sending messages and comments here if it can't reach the server for an hour. If people are messaging you and this stays old, resubscribe."
+      >
+        <button className={`btn ${busy ? "is-busy" : ""}`} onClick={resubscribe} disabled={busy}>Resubscribe</button>
+      </SettingRow>
+    </div>
   );
 }
 

@@ -18,3 +18,6 @@ begin
     execute format('drop policy if exists %I on %I.%I', p.policyname, p.schemaname, p.tablename);
   end loop;
 end $$;
+
+-- Migration 24 let the logged-out panel read the sending status.
+revoke execute on function public.sending_health() from anon;

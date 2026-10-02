@@ -38,7 +38,7 @@ async function audienceOf(b: Row): Promise<Row[]> {
     .is("opted_out_at", null)
     .limit(CONTACT_LIMIT);
   if (error) throw error;
-  return data ?? [];
+  return (data ?? []) as Row[];
 }
 
 /** Queue every bubble for every contact. One insert per bubble keeps each contact's order. */
@@ -58,6 +58,7 @@ async function queueBlocks(b: Row, contacts: Row[]): Promise<number> {
           comment_id: null,
           payload,
           broadcast_id: b.id,
+          proactive: true,
           expires_at: new Date(new Date(c.last_interaction_at).getTime() + WINDOW_MS).toISOString(),
         })),
       );

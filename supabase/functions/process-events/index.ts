@@ -5,7 +5,7 @@
 // at once, so every row is claimed before it is worked on.
 
 import { db, json } from "../_shared/db.ts";
-import { fetchFollowState, fetchProfile, MetaError, replyToComment } from "../_shared/meta.ts";
+import { fetchFollowState, fetchProfile, MetaError } from "../_shared/meta.ts";
 import { kick } from "../_shared/invoke.ts";
 import { requireService } from "../_shared/auth.ts";
 import { LIVE_REPLY_TTL_MS, PRIVATE_REPLY_TTL_MS, WINDOW_MS } from "../_shared/types.ts";
@@ -25,6 +25,8 @@ const MAX_SENDS_PER_RUN = 20;
 const MAX_FLOW_HOPS = 5;
 const HTTP_MAX_BYTES = 256 * 1024;
 const SKIP_PAYLOAD = "__SKIP__";
+// An answer under a comment hours later reads as a bot catching up; past this it is dropped.
+const PUBLIC_REPLY_TTL_MS = 2 * 60 * 60 * 1000;
 
 let queued = 0; // sends enqueued during this invocation, so we know whether to wake the sender
 
@@ -233,6 +235,9 @@ async function enqueue(
     // A run started by a broadcast or a sequence message credits its sends to it (stats).
     broadcast_id: run.state?.broadcast_id ?? null,
     sequence_step_id: run.state?.sequence_step_id ?? null,
+    // ...and draws on the slower proactive budget, until the contact answers: from then on it is
+    // a conversation they are waiting on.
+    proactive: Boolean(run.state?.broadcast_id || run.state?.sequence_step_id) && !answeredSince(contact, run),
     expires_at:
       kind === "private_reply"
         ? new Date(commentAt + replyTtl).toISOString()
@@ -240,6 +245,12 @@ async function enqueue(
   });
   if (error) throw new Error(`send_queue insert failed: ${error.message}`);
   queued++;
+}
+
+/** True when the contact messaged or tapped after this run began. */
+function answeredSince(contact: Row, run: Row): boolean {
+  if (!contact.last_interaction_at || !run.created_at) return false;
+  return new Date(contact.last_interaction_at).getTime() > new Date(run.created_at).getTime();
 }
 
 /** Which channel the next outbound must use, or null if the window has closed. */
@@ -859,7 +870,8 @@ async function executeRun(runId: string): Promise<void> {
   });
 }
 
-async function startRun(flow: Row, contact: Row, seed: Row): Promise<void> {
+/** Start a run. Returns its id, or null when the contact already had one going. */
+async function startRun(flow: Row, contact: Row, seed: Row): Promise<string | null> {
   const graph = (flow.graph ?? {}) as FlowGraph;
   const { data, error } = await sql
     .from("flow_run")
@@ -874,10 +886,11 @@ async function startRun(flow: Row, contact: Row, seed: Row): Promise<void> {
     .single();
   if (error) {
     // The one-active-run-per-contact index: another event already started a run. Not an error.
-    if (error.code === "23505") return;
+    if (error.code === "23505") return null;
     throw new Error(`flow_run insert failed: ${error.message}`);
   }
   await executeRun(data.id);
+  return data.id;
 }
 
 /** Claim a waiting run atomically. Returns true if this worker won it. */
@@ -989,27 +1002,61 @@ async function fire(match: { flow: Row; hit: TriggerHit } | null, contact: Row):
     if (dup.data?.length) return; // already fired for this story / live session
   }
 
-  // "Reply to their comment too": a public reply under the comment, alongside the DM. Rotates
-  // through the configured lines so it doesn't read as a bot. Best-effort — a failure here must
-  // not stop the DM flow from running.
-  const publicReplies = (match.flow.trigger_config?.commentReply ?? []).filter((s: string) => s.trim());
-  const commentId = seed.comment_id as string | undefined;
-  if (commentId && publicReplies.length) {
-    const line = publicReplies[Math.floor(Math.random() * publicReplies.length)];
-    try {
-      await replyToComment(commentId, line);
-    } catch (err) {
-      console.error("public comment reply failed:", err instanceof Error ? err.message : err);
-    }
-  }
+  const runId = await startRun(match.flow, contact, seed);
+  if (runId) await queuePublicReply(match.flow, contact, runId, seed.comment_id);
+}
 
-  await startRun(match.flow, contact, seed);
+let publicPaused: boolean | undefined; // read once per invocation
+
+/**
+ * "Reply to their comment too": a public reply under the comment, alongside the DM. Rotates
+ * through the configured lines so it doesn't read as a bot. Queued like every send, so the
+ * worker's limits and viral switch apply; nothing is queued while that switch is on.
+ */
+async function queuePublicReply(flow: Row, contact: Row, runId: string, commentId?: string): Promise<void> {
+  const lines = (flow.trigger_config?.commentReply ?? []).filter((s: string) => s.trim());
+  if (!commentId || !lines.length) return;
+  if (publicPaused === undefined) {
+    const { data } = await sql.from("send_guard").select("public_paused_until").eq("id", 1).maybeSingle();
+    publicPaused = Boolean(data?.public_paused_until && new Date(data.public_paused_until).getTime() > Date.now());
+  }
+  if (publicPaused) return;
+
+  const { error } = await sql.from("send_queue").insert({
+    contact_id: contact.id,
+    flow_run_id: runId,
+    send_type: "public_reply",
+    comment_id: commentId,
+    payload: { text: lines[Math.floor(Math.random() * lines.length)] },
+    expires_at: new Date(Date.now() + PUBLIC_REPLY_TTL_MS).toISOString(),
+  });
+  if (error) console.error("public reply insert failed:", error.message);
+  else queued++;
+}
+
+/**
+ * Meta re-delivers a webhook it thinks we missed. Record each message and comment the first
+ * time it arrives; false means it was handled already.
+ */
+async function firstSighting(key: string | null): Promise<boolean> {
+  if (!key) return true;
+  const { data, error } = await sql
+    .from("seen_item")
+    .upsert({ key }, { onConflict: "key", ignoreDuplicates: true })
+    .select("key");
+  if (error) {
+    console.warn("seen_item insert failed:", error.message);
+    return true; // better a rare duplicate than a dropped message
+  }
+  return Boolean(data?.length);
 }
 
 /** An inbound message: record it, resume a waiting run, or match a trigger. */
 async function handleMessagingItem(item: RawItem, liveFlows: Row[]): Promise<void> {
   const m = item.messaging!;
   if (!isInbound(m)) return; // our echo, a receipt, or a reaction
+  const mid = m.message?.mid ?? m.postback?.mid;
+  if (!(await firstSighting(mid ? `m:${mid}` : null))) return;
 
   const igsid: string = m.sender.id;
   const text: string =
@@ -1056,6 +1103,7 @@ async function handleChangeItem(item: RawItem, liveFlows: Row[]): Promise<void> 
   const value = item.change?.value ?? {};
   const igsid: string | undefined = value.from?.id;
   if (!igsid || igsid === item.selfIgId) return; // our own comment, or no author
+  if (!(await firstSighting(value.id ? `c:${item.change?.field}:${value.id}` : null))) return;
 
   const contact = await upsertContact(igsid, value.from?.username, false);
   if (await activeRun(contact.id)) return;
@@ -1135,6 +1183,7 @@ Deno.serve(async (req) => {
   queued = 0;
   optSettings = undefined;
   profileFetches = new Map();
+  publicPaused = undefined;
   try {
     const events = await processInbox();
     const resumed = await resumeDue();

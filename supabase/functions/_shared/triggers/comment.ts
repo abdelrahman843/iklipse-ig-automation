@@ -2,8 +2,9 @@ import type { TriggerConfig } from "../types.ts";
 import { keywordHit, type RawItem, type TriggerDef, type TriggerHit } from "./kit.ts";
 
 /**
- * A user's first comment on a post. Meta only delivers the first, so once-per-user is its
- * behaviour, not ours. The reply is a private reply, which does not open the window.
+ * A comment on a post. Once per person per post: someone commenting the keyword ten times gets one
+ * DM and one reply under their comment, not ten (scopeKey). The reply is a private reply, which
+ * does not open the window.
  */
 export const comment: TriggerDef = {
   type: "comment",
@@ -36,6 +37,7 @@ export const comment: TriggerDef = {
         media_id: v.media?.id ?? null,
         trigger_text: text,
       },
+      scopeKey: `post:${v.media?.id ?? "any"}:${igsid}`,
     };
   },
   matches(config: TriggerConfig, hit: TriggerHit): boolean {

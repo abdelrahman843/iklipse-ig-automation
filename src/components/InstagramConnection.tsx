@@ -35,7 +35,7 @@ function authorizeUrl(state: string): string {
 }
 
 /** POST to the ig-oauth function as the signed-in user. */
-async function callOauth(action: "start" | "disconnect"): Promise<Record<string, unknown>> {
+export async function callOauth(action: "start" | "disconnect" | "resubscribe"): Promise<Record<string, unknown>> {
   const { data } = await supabase.auth.getSession();
   // Auth may be disabled (no session). Fall back to the anon key; the function only accepts it
   // when its ALLOW_ANON secret is set.

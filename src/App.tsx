@@ -201,12 +201,12 @@ export function App() {
             <path d="M3 5h12M3 9h12M3 13h12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
           </svg>
         </button>
-        <span className="mobile-title">{NAV.find((n) => location.pathname.startsWith(n.to))?.label ?? "Not manychat"}</span>
+        <span className="mobile-title">{NAV.find((n) => location.pathname.startsWith(n.to))?.label ?? "Iklipse"}</span>
       </header>
       <div className="drawer-scrim" onClick={() => setDrawerOpen(false)} aria-hidden="true" />
       <nav className="rail" aria-label="Main">
         <div className="rail-top">
-          <div className="mark"><span className="mark-text">Not manychat</span></div>
+          <div className="mark"><span className="mark-text">Iklipse</span></div>
           <button
             className="rail-close"
             onClick={() => setDrawerOpen(false)}

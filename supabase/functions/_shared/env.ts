@@ -21,9 +21,6 @@ export const IG_USER_ID = () => env("IG_USER_ID");
 
 export const GRAPH_BASE = () => env("GRAPH_BASE", "https://graph.instagram.com/v26.0");
 
-/** Meta's private-reply ceiling, per account, per hour. */
-export const PRIVATE_REPLY_HOURLY_CAP = Number(Deno.env.get("PRIVATE_REPLY_HOURLY_CAP") ?? "750");
-
 // ---- Instagram OAuth (connect flow) ----------------------------------------------------
 
 /** Instagram app id. The client_id in the authorize URL and the token exchange. */

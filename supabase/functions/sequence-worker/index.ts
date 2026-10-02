@@ -159,6 +159,7 @@ Deno.serve(async (req) => {
           comment_id: null,
           payload,
           sequence_step_id: step.id,
+          proactive: true,
           expires_at: expires,
         });
         if (qErr) {

@@ -19,6 +19,68 @@ export class MetaError extends Error {
     // 10: permission denied, 100: bad parameter, 551: user cannot be messaged
     return this.code === 10 || this.code === 100 || this.code === 551;
   }
+
+  /**
+   * Meta pushing back on the whole account rather than on this one message. Every send must
+   * stop: retrying through a rate limit or a block is what gets accounts disabled.
+   *   blocked  368, "temporarily blocked" / "deemed abusive"
+   *   auth     190, the stored access no longer works
+   *   rate     4, 17, 32, 613 and the 80000-80014 business use case limits
+   */
+  get breaker(): "blocked" | "auth" | "rate" | null {
+    const c = this.code ?? -1;
+    if (c === 368 || /temporarily blocked|deemed abusive/i.test(this.message)) return "blocked";
+    if (c === 190) return "auth";
+    if (c === 4 || c === 17 || c === 32 || c === 613 || (c >= 80000 && c <= 80014)) return "rate";
+    return null;
+  }
+}
+
+/** How much of its call quota Meta says the app / account has used, from the last response. */
+export interface UsagePressure {
+  percent: number;
+  /** Meta's estimate, in minutes, until a throttled account can call again. */
+  regainMinutes: number;
+}
+
+let lastPressure: UsagePressure | null = null;
+
+export function usagePressure(): UsagePressure | null {
+  return lastPressure;
+}
+
+function headerJson(headers: Headers, name: string): Record<string, unknown> | null {
+  const raw = headers.get(name);
+  if (!raw) return null;
+  try {
+    const v = JSON.parse(raw);
+    return v && typeof v === "object" ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+/** x-app-usage: {call_count, total_time, total_cputime}; x-business-use-case-usage: {id: [{...}]}. */
+function readPressure(headers: Headers): UsagePressure | null {
+  const pct = (u: Record<string, unknown>) =>
+    Math.max(Number(u.call_count) || 0, Number(u.total_time) || 0, Number(u.total_cputime) || 0);
+  let percent = 0;
+  let regainMinutes = 0;
+  let seen = false;
+
+  const app = headerJson(headers, "x-app-usage");
+  if (app) {
+    seen = true;
+    percent = pct(app);
+  }
+  for (const list of Object.values(headerJson(headers, "x-business-use-case-usage") ?? {})) {
+    for (const u of Array.isArray(list) ? list : []) {
+      seen = true;
+      percent = Math.max(percent, pct(u));
+      regainMinutes = Math.max(regainMinutes, Number(u.estimated_time_to_regain_access) || 0);
+    }
+  }
+  return seen ? { percent, regainMinutes } : null;
 }
 
 /** Only plain web links may leave as buttons; anything else (javascript:, data:) is refused. */
@@ -40,6 +102,7 @@ async function call(path: string, init: RequestInit): Promise<Record<string, unk
     },
   });
 
+  lastPressure = readPressure(res.headers);
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {
     const err = (body as { error?: Record<string, unknown> }).error ?? {};
