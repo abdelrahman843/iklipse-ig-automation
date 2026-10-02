@@ -1,0 +1,6 @@
+/* Tailwind utilities for the visual flow editor. Preflight (the global reset) is deliberately
+   NOT imported: the rest of the app has its own reset in index.css, and pulling in Tailwind's
+   would restyle every existing page. We take the theme + utility classes only. */
+@layer theme, base, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);

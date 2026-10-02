@@ -1,0 +1,40 @@
+project_id = "ig-mvp"
+
+[functions.ig-webhook]
+# Meta signs requests with X-Hub-Signature-256, not a Supabase JWT.
+verify_jwt = false
+
+[functions.process-events]
+verify_jwt = true
+
+[functions.send-worker]
+verify_jwt = true
+
+[functions.ig-oauth]
+# The GET callback is a top-level browser redirect from Instagram — it carries no Supabase JWT.
+# The POST (disconnect) verifies the panel session JWT itself.
+verify_jwt = false
+
+[functions.ig-token-refresh]
+# Called by pg_cron with the service role bearer, like the other workers.
+verify_jwt = true
+
+[functions.inbox-send]
+# The composer calls this from the browser; it verifies the panel token itself.
+verify_jwt = false
+
+[functions.messenger-profile]
+# The Menu screen calls this from the browser; it verifies the panel token itself.
+verify_jwt = false
+
+[functions.ig-media]
+# The trigger post-picker calls this from the browser to list the account's posts.
+verify_jwt = false
+
+[functions.sequence-worker]
+# Called by pg_cron with the service role bearer, like the other workers.
+verify_jwt = true
+
+[functions.broadcast-worker]
+# Called by pg_cron with the service role bearer, like the other workers.
+verify_jwt = true
