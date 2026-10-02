@@ -1,0 +1,10 @@
+node_modules
+dist
+.env
+.env.local
+.DS_Store
+supabase/.temp
+migrate.env
+*.local.sql
+*.stackdump
+*.tsbuildinfo
