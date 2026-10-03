@@ -19,6 +19,9 @@ import type { NodeType } from "../lib/types";
 
 const nodeTypes = { flowNode: FlowNodeCard, triggerNode: TriggerNode, noteNode: NoteNode };
 
+/** How far the pointer may move during a click before it counts as a drag. */
+const CLICK_SLACK_PX = 6;
+
 interface ConnectMenu {
   x: number;
   y: number;
@@ -72,6 +75,11 @@ export function Canvas() {
         }}
         onNodeClick={(_, n: Node) => select(n.id)}
         onPaneClick={() => { select(null); setMenu(null); }}
+        // React Flow's defaults treat a 1px hand wobble during a click as a drag and swallow the
+        // click, so opening a node took a second, stiller click. A few pixels of slack fixes it.
+        nodeClickDistance={CLICK_SLACK_PX}
+        nodeDragThreshold={CLICK_SLACK_PX}
+        paneClickDistance={CLICK_SLACK_PX}
         fitView
         fitViewOptions={{ padding: 0.2 }}
         proOptions={{ hideAttribution: true }}
