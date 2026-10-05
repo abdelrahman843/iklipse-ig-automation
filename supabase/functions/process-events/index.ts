@@ -5,7 +5,7 @@
 // at once, so every row is claimed before it is worked on.
 
 import { db, json } from "../_shared/db.ts";
-import { fetchFollowState, fetchProfile, MetaError } from "../_shared/meta.ts";
+import { fetchFollowState, fetchProfile, listMedia, MetaError } from "../_shared/meta.ts";
 import { kick } from "../_shared/invoke.ts";
 import { requireService } from "../_shared/auth.ts";
 import { LIVE_REPLY_TTL_MS, PRIVATE_REPLY_TTL_MS, WINDOW_MS } from "../_shared/types.ts";
@@ -29,8 +29,8 @@ const SKIP_PAYLOAD = "__SKIP__";
 const PUBLIC_REPLY_TTL_MS = 2 * 60 * 60 * 1000;
 // A person answering a comment takes a moment; an answer in the same second reads as a bot
 // (Manychat suggests a short Smart Delay before the first message). Random within these ranges.
-const PRIVATE_REPLY_PAUSE_MS: [number, number] = [10_000, 45_000];
-const PUBLIC_REPLY_PAUSE_MS: [number, number] = [30_000, 120_000];
+const PRIVATE_REPLY_PAUSE_MS: [number, number] = [4_000, 12_000];
+const PUBLIC_REPLY_PAUSE_MS: [number, number] = [10_000, 40_000];
 
 function after([min, max]: [number, number]): string {
   return new Date(Date.now() + min + Math.random() * (max - min)).toISOString();
@@ -302,10 +302,18 @@ function buildQuicks(node: FlowNode): { title: string; payload: string }[] {
   return q;
 }
 
+let botFields: Record<string, string> = {}; // read once per invocation; {{bot.key}}
+
+async function loadBotFields(): Promise<void> {
+  const { data } = await sql.from("bot_field").select("key, value");
+  botFields = Object.fromEntries((data ?? []).map((f: Row) => [f.key, f.value]));
+}
+
 function readPath(path: string, state: Row, contact: Row): unknown {
   const [scope, ...rest] = path.split(".");
   const key = rest.join(".");
   if (scope === "state") return state?.[key];
+  if (scope === "bot") return botFields[key];
   // {{contact.username}} reads the contact; {{contact.city}} falls through to a custom field.
   if (scope === "contact") return contact?.[key] ?? contact?.custom_fields?.[key];
   return undefined;
@@ -366,8 +374,11 @@ function pickBranch(node: FlowNode): string | null {
   return branches[branches.length - 1].key;
 }
 
-/** Apply an Action node's list of side effects to the contact. Best-effort per action. */
-async function runActions(node: FlowNode, state: Row, contact: Row, run: Row): Promise<void> {
+/**
+ * Apply an Action node's list of side effects to the contact. Best-effort per action. Returns
+ * false when an action deleted the contact: the run is gone with it and must stop.
+ */
+async function runActions(node: FlowNode, state: Row, contact: Row, run: Row): Promise<boolean> {
   for (const a of node.actions ?? []) {
     try {
       switch (a.kind) {
@@ -398,6 +409,42 @@ async function runActions(node: FlowNode, state: Row, contact: Row, run: Row): P
         case "mark_done":
           await sql.from("contact").update({ status: "done" }).eq("id", contact.id);
           break;
+        case "mark_open":
+          await sql.from("contact").update({ status: "open" }).eq("id", contact.id);
+          break;
+        case "opt_in":
+          await sql.from("contact").update({ opted_out_at: null }).eq("id", contact.id);
+          break;
+        case "opt_out":
+          // Same as the contact typing an opt-out word: no more broadcasts or sequence messages.
+          await sql.from("contact").update({ opted_out_at: new Date().toISOString() }).eq("id", contact.id);
+          await sql
+            .from("sequence_subscription")
+            .update({ status: "cancelled" })
+            .eq("contact_id", contact.id)
+            .eq("status", "active");
+          break;
+        case "set_bot_field": {
+          if (!a.field) break;
+          const value = interpolate(a.value ?? "", state, contact);
+          await sql.from("bot_field").upsert({ key: a.field, value, updated_at: new Date().toISOString() }, { onConflict: "key" });
+          botFields[a.field] = value;
+          break;
+        }
+        case "log_conversion": {
+          const amount = Number(interpolate(a.value ?? "", state, contact));
+          await sql.from("conversion_event").insert({
+            contact_id: contact.id,
+            flow_id: run.flow_id ?? null,
+            name: (a.event ?? "").trim() || "conversion",
+            value: a.value?.trim() && Number.isFinite(amount) ? amount : null,
+          });
+          break;
+        }
+        case "delete_contact":
+          // Messages, runs (this one too), notes and queued sends go with it.
+          await sql.from("contact").delete().eq("id", contact.id);
+          return false;
         case "notify":
           await sql.from("contact_note").insert({
             contact_id: contact.id,
@@ -434,7 +481,7 @@ async function runActions(node: FlowNode, state: Row, contact: Row, run: Row): P
       console.warn(`action ${a.kind} failed:`, err instanceof Error ? err.message : err);
     }
   }
-  void run;
+  return true;
 }
 
 /** True for hosts an automation must never reach: loopback, private ranges, cloud metadata. */
@@ -664,7 +711,7 @@ async function executeRun(runId: string): Promise<void> {
       }
 
       case "action": {
-        await runActions(node, state, contact, run);
+        if (!(await runActions(node, state, contact, run))) return; // the contact was deleted
         // Re-read the contact so later nodes (condition on tag, etc.) see the mutations.
         const { data: fresh } = await sql.from("contact").select().eq("id", contact.id).single();
         if (fresh) contact = fresh;
@@ -1109,12 +1156,58 @@ async function handleMessagingItem(item: RawItem, liveFlows: Row[]): Promise<voi
   await fire(matchTrigger(item, liveFlows), contact);
 }
 
+let recentMedia: Promise<{ id: string; timestamp: string }[]> | null = null; // read once per invocation
+
+/** Instagram writes "+0000"; make it an offset every Date parser accepts. */
+const igTime = (t: string) => new Date(t.replace(/([+-]\d\d)(\d\d)$/, "$1:$2")).getTime();
+
+/**
+ * "Next post or reel": a live comment automation set up before its post existed. Once a post is
+ * published after the moment it was chosen, bind the automation to the earliest such post, so
+ * from then on it behaves like "specific post". Runs on comments only, and only reads the post
+ * list when some automation is still waiting.
+ */
+async function bindNextPosts(flows: Row[]): Promise<void> {
+  const waiting = flows.filter(
+    (f) => f.trigger_type === "comment" && f.trigger_config?.nextPostAfter && !f.trigger_config?.mediaId,
+  );
+  if (!waiting.length) return;
+  recentMedia ??= listMedia().catch((err) => {
+    console.warn("next post: could not list posts:", err instanceof Error ? err.message : err);
+    return [];
+  });
+  const media = await recentMedia;
+
+  for (const flow of waiting) {
+    const after = new Date(flow.trigger_config.nextPostAfter).getTime();
+    const next = media
+      .filter((m) => igTime(m.timestamp) > after)
+      .sort((a, b) => igTime(a.timestamp) - igTime(b.timestamp))[0];
+    if (!next) continue;
+
+    const trigger_config = { ...flow.trigger_config, mediaId: next.id };
+    const patch: Row = { trigger_config };
+    // An unpublished edit that still says "next post" is bound to the same post.
+    const pending = flow.draft?.trigger_config;
+    if (pending?.nextPostAfter === flow.trigger_config.nextPostAfter && !pending.mediaId) {
+      patch.draft = { ...flow.draft, trigger_config: { ...pending, mediaId: next.id } };
+    }
+    const { error } = await sql.from("flow").update(patch).eq("id", flow.id);
+    if (error) {
+      console.error(`next post: binding flow ${flow.id} failed:`, error.message);
+      continue;
+    }
+    Object.assign(flow, patch); // this batch matches against the bound post too
+  }
+}
+
 /** A change (comment, live comment): match a trigger. A comment never opens the window. */
 async function handleChangeItem(item: RawItem, liveFlows: Row[]): Promise<void> {
   const value = item.change?.value ?? {};
   const igsid: string | undefined = value.from?.id;
   if (!igsid || igsid === item.selfIgId) return; // our own comment, or no author
   if (!(await firstSighting(value.id ? `c:${item.change?.field}:${value.id}` : null))) return;
+  if (item.change?.field === "comments") await bindNextPosts(liveFlows);
 
   const contact = await upsertContact(igsid, value.from?.username, false);
   if (await activeRun(contact.id)) return;
@@ -1195,6 +1288,8 @@ Deno.serve(async (req) => {
   optSettings = undefined;
   profileFetches = new Map();
   publicPaused = undefined;
+  recentMedia = null;
+  await loadBotFields().catch((err) => console.warn("bot fields not loaded:", err));
   try {
     const events = await processInbox();
     const resumed = await resumeDue();

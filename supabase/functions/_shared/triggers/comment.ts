@@ -42,6 +42,7 @@ export const comment: TriggerDef = {
   },
   matches(config: TriggerConfig, hit: TriggerHit): boolean {
     if (config.mediaId && config.mediaId !== hit.mediaId) return false;
+    if (!config.mediaId && config.nextPostAfter) return false; // next post not published yet
     return keywordHit(config, hit.text);
   },
   configSchema: [

@@ -10,6 +10,8 @@
 //   proactive      broadcasts and sequence messages                4/min, 200/h
 //   per contact    25 messages an hour
 // Replies to someone waiting go out at once; everything else is spaced a few seconds apart.
+// A comment reply held by its short "human" pause is sent the moment the pause ends: one worker
+// at a time (the send_guard.waiting_until lease) stays up for WAIT_BUDGET_MS polling for it.
 //
 // Circuit breaker: Meta answering "rate limited" or "blocked", the access token dying, or Meta's
 // own usage headers passing 80% stops ALL sending for a while (send_guard.paused_until). Retrying
@@ -29,6 +31,10 @@ const HOUR_MS = 60 * 60 * 1000;
 const PAUSE_MINUTES = { rate: 60, blocked: 24 * 60, auth: 30 } as const;
 /** Meta's usage headers past this share of the quota stop sending before Meta has to. */
 const USAGE_PAUSE_PERCENT = 80;
+/** How long one worker keeps waiting for paused rows. Under the 55 s pg_net call timeout. */
+const WAIT_BUDGET_MS = 40_000;
+/** How often the waiting worker looks for rows that fell due (new ones can arrive meanwhile). */
+const POLL_MS = 1_500;
 
 /** 1m, 2m, 4m, 8m, 16m, capped at an hour. */
 function backoffMs(attempts: number): number {
@@ -136,65 +142,129 @@ const BREAKER_REASON = {
   auth: "Instagram access stopped working; reconnect the account",
 } as const;
 
+interface Round {
+  sent: number;
+  claimed: number;
+  stopped: string | null;
+}
+
+/** Claim what the limits allow right now and send it. */
+async function round(): Promise<Round> {
+  // Viral switch first, so a claim never picks up a reply under a comment it just turned off.
+  const { error: tickErr } = await sql.rpc("send_guard_tick");
+  if (tickErr) throw new Error(`send_guard_tick failed: ${tickErr.message}`);
+
+  const { data: claimed, error } = await sql.rpc("claim_send_batch");
+  if (error) throw new Error(`claim_send_batch failed: ${error.message}`);
+  const claimedRows = (claimed ?? []) as Row[];
+  // People waiting on a reply first.
+  const rows = [...claimedRows.filter(isReactive), ...claimedRows.filter((r) => !isReactive(r))];
+
+  // The claim returns plain rows; look up each contact's igsid in one read.
+  const ids = [...new Set(rows.map((r) => r.contact_id))];
+  const { data: contacts } = ids.length
+    ? await sql.from("contact").select("id, igsid").in("id", ids)
+    : { data: [] as Row[] };
+  const igsidOf = new Map((contacts ?? []).map((c: Row) => [c.id, c.igsid]));
+
+  let sent = 0;
+  let stopped: string | null = null;
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    if (i > 0 && !isReactive(row)) await sleep(gapMs());
+
+    try {
+      const result = await deliver(row, igsidOf.get(row.contact_id));
+      await markSent(row, ((result.message_id ?? result.id) as string) ?? null);
+      sent++;
+    } catch (err) {
+      const breaker = err instanceof MetaError ? err.breaker : null;
+      if (breaker) {
+        stopped = `${BREAKER_REASON[breaker]}: ${(err as Error).message}`;
+        await pause(PAUSE_MINUTES[breaker], stopped);
+        if (breaker === "auth") {
+          await sql.from("ig_account").update({ status: "needs_reconnect" }).eq("status", "connected");
+        }
+        await release(rows.slice(i));
+        break;
+      }
+      console.error(`send_queue ${row.id} failed:`, err);
+      await markFailure(row, err);
+    }
+
+    const pressure = usagePressure();
+    if (pressure && pressure.percent >= USAGE_PAUSE_PERCENT) {
+      stopped = `Meta reports ${pressure.percent}% of the call quota used`;
+      await pause(Math.max(15, pressure.regainMinutes), stopped);
+      await release(rows.slice(i + 1));
+      break;
+    }
+  }
+
+  return { sent, claimed: rows.length, stopped };
+}
+
+/** When the next pending row falls due, or null if none is pending. */
+async function nextDue(): Promise<number | null> {
+  const { data } = await sql
+    .from("send_queue")
+    .select("next_attempt_at")
+    .eq("status", "pending")
+    .order("next_attempt_at")
+    .limit(1);
+  return data?.[0] ? new Date(data[0].next_attempt_at).getTime() : null;
+}
+
+/** Take the waiting lease; false when another worker already holds it. */
+async function takeWait(until: string): Promise<boolean> {
+  const { data } = await sql
+    .from("send_guard")
+    .update({ waiting_until: until })
+    .eq("id", 1)
+    .or(`waiting_until.is.null,waiting_until.lt.${new Date().toISOString()}`)
+    .select("id");
+  return Boolean(data?.length);
+}
+
+async function releaseWait(until: string): Promise<void> {
+  await sql.from("send_guard").update({ waiting_until: null }).eq("id", 1).eq("waiting_until", until);
+}
+
 Deno.serve(async (req) => {
   const denied = requireService(req);
   if (denied) return denied;
+  const started = Date.now();
   try {
     const expired = await expireStale();
+    const total = { sent: 0, claimed: 0, rounds: 1 };
+    let r = await round();
+    total.sent += r.sent;
+    total.claimed += r.claimed;
 
-    // Viral switch first, so a claim never picks up a reply under a comment it just turned off.
-    const { error: tickErr } = await sql.rpc("send_guard_tick");
-    if (tickErr) throw new Error(`send_guard_tick failed: ${tickErr.message}`);
-
-    const { data: claimed, error } = await sql.rpc("claim_send_batch");
-    if (error) throw new Error(`claim_send_batch failed: ${error.message}`);
-    const claimedRows = (claimed ?? []) as Row[];
-    // People waiting on a reply first.
-    const rows = [...claimedRows.filter(isReactive), ...claimedRows.filter((r) => !isReactive(r))];
-
-    // The claim returns plain rows; look up each contact's igsid in one read.
-    const ids = [...new Set(rows.map((r) => r.contact_id))];
-    const { data: contacts } = ids.length
-      ? await sql.from("contact").select("id, igsid").in("id", ids)
-      : { data: [] as Row[] };
-    const igsidOf = new Map((contacts ?? []).map((c: Row) => [c.id, c.igsid]));
-
-    let sent = 0;
-    let stopped: string | null = null;
-
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i];
-      if (i > 0 && !isReactive(row)) await sleep(gapMs());
-
+    const lease = new Date(started + WAIT_BUDGET_MS + 10_000).toISOString();
+    if (!r.stopped && (await takeWait(lease))) {
       try {
-        const result = await deliver(row, igsidOf.get(row.contact_id));
-        await markSent(row, ((result.message_id ?? result.id) as string) ?? null);
-        sent++;
-      } catch (err) {
-        const breaker = err instanceof MetaError ? err.breaker : null;
-        if (breaker) {
-          stopped = `${BREAKER_REASON[breaker]}: ${(err as Error).message}`;
-          await pause(PAUSE_MINUTES[breaker], stopped);
-          if (breaker === "auth") {
-            await sql.from("ig_account").update({ status: "needs_reconnect" }).eq("status", "connected");
+        while (Date.now() - started < WAIT_BUDGET_MS) {
+          const due = await nextDue();
+          if (due === null || due > started + WAIT_BUDGET_MS) break; // the minute cron covers it
+          if (due > Date.now()) {
+            await sleep(Math.min(due - Date.now(), POLL_MS));
+            continue;
           }
-          await release(rows.slice(i));
-          break;
+          r = await round();
+          total.rounds++;
+          total.sent += r.sent;
+          total.claimed += r.claimed;
+          // Due but nothing claimable: a limit is reached or sending is paused. Leave it to cron.
+          if (r.stopped || r.claimed === 0) break;
         }
-        console.error(`send_queue ${row.id} failed:`, err);
-        await markFailure(row, err);
-      }
-
-      const pressure = usagePressure();
-      if (pressure && pressure.percent >= USAGE_PAUSE_PERCENT) {
-        stopped = `Meta reports ${pressure.percent}% of the call quota used`;
-        await pause(Math.max(15, pressure.regainMinutes), stopped);
-        await release(rows.slice(i + 1));
-        break;
+      } finally {
+        await releaseWait(lease);
       }
     }
 
-    return json({ sent, claimed: rows.length, expired, stopped });
+    return json({ ...total, expired, stopped: r.stopped });
   } catch (err) {
     console.error("send-worker failed:", err);
     return json({ error: String(err) }, 500);

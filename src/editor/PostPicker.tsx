@@ -13,11 +13,21 @@ interface Post {
 
 /**
  * Picks a post for the comment trigger by showing the connected account's actual posts, the way
- * ManyChat does: a "Specific Post or Reel" grid plus an "All Posts or Reels" option. The list
- * comes from the ig-media edge function, which reads it with the server-side token. An empty
- * value means "every post".
+ * ManyChat does: a "Specific Post or Reel" grid, "All Posts or Reels", and "Next Post or Reel" for
+ * one not published yet. The list comes from the ig-media edge function, which reads it with the
+ * server-side token. An empty mediaId means "every post" unless nextPostAfter is set; the server
+ * fills mediaId in once that next post exists.
  */
-export function PostPicker({ value, onChange }: { value?: string; onChange: (id: string) => void }) {
+export function PostPicker({
+  value,
+  nextAfter,
+  onChange,
+}: {
+  value?: string;
+  nextAfter?: string;
+  onChange: (patch: { mediaId: string; nextPostAfter?: string }) => void;
+}) {
+  const pick = (mediaId: string) => onChange({ mediaId, nextPostAfter: undefined });
   const [posts, setPosts] = useState<Post[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -77,7 +87,7 @@ export function PostPicker({ value, onChange }: { value?: string; onChange: (id:
         ) : (
           <div className="postpick-grid-in">
             {grid.map((p) => (
-              <PostTile key={p.id} post={p} selected={p.id === value} onPick={() => onChange(p.id)} />
+              <PostTile key={p.id} post={p} selected={p.id === value} onPick={() => pick(p.id)} />
             ))}
           </div>
         )}
@@ -85,12 +95,28 @@ export function PostPicker({ value, onChange }: { value?: string; onChange: (id:
 
       <button
         type="button"
-        className={`postpick-all ${!value ? "on" : ""}`}
-        onClick={() => onChange("")}
+        className={`postpick-all ${!value && !nextAfter ? "on" : ""}`}
+        onClick={() => pick("")}
       >
-        <span className="postpick-radio">{!value && <Dot />}</span>
+        <span className="postpick-radio">{!value && !nextAfter && <Dot />}</span>
         All Posts or Reels
       </button>
+
+      <button
+        type="button"
+        className={`postpick-all ${nextAfter ? "on" : ""}`}
+        onClick={() => onChange({ mediaId: "", nextPostAfter: new Date().toISOString() })}
+      >
+        <span className="postpick-radio">{nextAfter && <Dot />}</span>
+        Next Post or Reel
+      </button>
+      {nextAfter && (
+        <p className="mono" style={{ margin: "6px 0 0" }}>
+          {value
+            ? "Set to the first post you published after choosing this (highlighted above)."
+            : `Waiting for your next post. The first one you publish after ${new Date(nextAfter).toLocaleString()} starts this automation.`}
+        </p>
+      )}
 
       {open && (
         <div className="modal-scrim" onClick={() => setOpen(false)}>
@@ -102,7 +128,7 @@ export function PostPicker({ value, onChange }: { value?: string; onChange: (id:
             <div className="postpick-body">
               <div className="postpick-grid">
                 {posts.map((p) => (
-                  <PostTile key={p.id} post={p} selected={p.id === value} big onPick={() => { onChange(p.id); setOpen(false); }} />
+                  <PostTile key={p.id} post={p} selected={p.id === value} big onPick={() => { pick(p.id); setOpen(false); }} />
                 ))}
               </div>
             </div>

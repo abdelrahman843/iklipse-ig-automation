@@ -28,6 +28,7 @@ export function Flows() {
   const [flows, setFlows] = useState<Flow[]>([]);
   const [folders, setFolders] = useState<FlowFolder[]>([]);
   const [runs, setRuns] = useState<Record<string, number>>({});
+  const [conversions, setConversions] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -58,6 +59,10 @@ export function Flows() {
       const r = await supabase.rpc("flow_run_counts");
       if (r.error) toast.error(r.error);
       else setRuns(Object.fromEntries((r.data ?? []).map((x: { flow_id: string; runs: number }) => [x.flow_id, Number(x.runs)])));
+      const c = await supabase.rpc("flow_conversion_counts");
+      if (!c.error) {
+        setConversions(Object.fromEntries((c.data ?? []).map((x: { flow_id: string; conversions: number }) => [x.flow_id, Number(x.conversions)])));
+      }
     } catch (err) {
       setError(
         `Could not reach Supabase: ${errorText(err)}. ` +
@@ -392,6 +397,7 @@ export function Flows() {
                   <th className="col-menu" />
                   <th>Name</th>
                   {!inTrash && <th className="num">Runs</th>}
+                  {!inTrash && <th className="num">Conversions</th>}
                   <th className="af-when">{inTrash ? "Deleted" : "Modified"}</th>
                 </tr>
               </thead>
@@ -424,6 +430,7 @@ export function Flows() {
                         {inFolder(folder.id) === 0 ? "Empty" : `${inFolder(folder.id)} ${inFolder(folder.id) === 1 ? "item" : "items"}`}
                       </div>
                     </td>
+                    <td className="num" />
                     <td className="num" />
                     <td className="cell-muted af-when">{relativeTime(folder.created_at)}</td>
                   </tr>
@@ -478,6 +485,7 @@ export function Flows() {
                         </div>
                       </td>
                       {!inTrash && <td className="num">{runs[flow.id] ?? 0}</td>}
+                      {!inTrash && <td className="num">{conversions[flow.id] ?? 0}</td>}
                       <td className="cell-muted af-when">{relativeTime(inTrash ? flow.deleted_at : flow.updated_at)}</td>
                     </tr>
                   );

@@ -20,16 +20,25 @@ export type ActionKind =
   | "remove_tag"
   | "assign"
   | "mark_done"
+  | "mark_open"
   | "notify"
   | "subscribe_sequence"
-  | "unsubscribe_sequence";
+  | "unsubscribe_sequence"
+  | "opt_in"
+  | "opt_out"
+  | "delete_contact"
+  | "set_bot_field"
+  | "log_conversion";
 
 export interface FlowAction {
   kind: ActionKind;
   /** set_field / clear_field: the custom-field key. */
   field?: string;
-  /** set_field: the value to write (supports {{state.x}} / {{contact.y}} interpolation). */
+  /** set_field / set_bot_field: the value to write (supports {{state.x}} / {{contact.y}} / {{bot.z}}).
+   *  log_conversion: the optional amount. */
   value?: string;
+  /** log_conversion: the event name, e.g. "purchase". */
+  event?: string;
   /** add_tag / remove_tag: the tag name. */
   tag?: string;
   /** assign: the agent to assign the conversation to. */
@@ -157,6 +166,9 @@ export type TriggerType =
 
 export interface TriggerConfig {
   mediaId?: string;
+  /** comment: "Next post or reel" chosen at this moment. The server binds mediaId to the first post
+   *  published after it; until then the automation matches nothing. */
+  nextPostAfter?: string;
   keywords?: string[];
   match?: "contains" | "exact";
   /** default_reply: do not fire on story replies. */

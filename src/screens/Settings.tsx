@@ -46,7 +46,12 @@ export function Settings() {
           {id === "instagram" && <InstagramSettings />}
           {id === "livechat" && <LiveChatTab />}
           {id === "team" && <TeamTab />}
-          {id === "fields" && <FieldsTab />}
+          {id === "fields" && (
+            <>
+              <FieldsTab />
+              <BotFieldsPanel />
+            </>
+          )}
           {id === "tags" && <TagsTab />}
         </div>
       </div>
@@ -459,6 +464,93 @@ function FieldsTab() {
                 <td className="cell-muted">{FIELD_TYPES.find((t) => t.value === f.type)?.label ?? f.type}</td>
                 <td className="num">{counts[f.key] ?? 0}</td>
                 <td className="cell-muted">{f.created_at ? relativeTime(f.created_at) : "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </Panel>
+  );
+}
+
+/** Bot fields: one value shared by every contact, set here or by the "Set a bot field" action. */
+function BotFieldsPanel() {
+  const [rows, setRows] = useState<{ key: string; value: string; updated_at: string }[] | null>(null);
+  const [key, setKey] = useState("");
+  const [value, setValue] = useState("");
+
+  async function load() {
+    const { data, error } = await supabase.from("bot_field").select("key, value, updated_at").order("key");
+    if (error) toast.error(error);
+    setRows(data ?? []);
+  }
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  const clean = key.trim().toLowerCase().replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "");
+
+  async function save(k: string, v: string) {
+    const { error } = await supabase.from("bot_field").upsert({ key: k, value: v, updated_at: new Date().toISOString() }, { onConflict: "key" });
+    if (error) return toast.error(error);
+    toast.success(`Bot field “${k}” saved`);
+    load();
+  }
+
+  async function edit(r: { key: string; value: string }) {
+    const next = window.prompt(`New value for ${r.key}`, r.value);
+    if (next !== null && next !== r.value) save(r.key, next);
+  }
+
+  async function remove(k: string) {
+    const ok = await confirmDialog({
+      title: `Delete bot field “${k}”?`,
+      body: "Messages that insert it show nothing in its place, and a Set action creates it again.",
+      confirmLabel: "Delete Field",
+      danger: true,
+    });
+    if (!ok) return;
+    const { error } = await supabase.from("bot_field").delete().eq("key", k);
+    if (error) return toast.error(error);
+    toast.success(`Bot field “${k}” deleted`);
+    load();
+  }
+
+  if (!rows) return null;
+
+  return (
+    <Panel
+      title="Bot fields"
+      about={<>One value shared by every contact, such as a promo code or today's offer. Put <code>{"{{bot.field_name}}"}</code> in a message to insert it.</>}
+    >
+      <div className="st-add">
+        <input className="input" placeholder="New bot field, e.g. promo_code" value={key} onChange={(e) => setKey(e.target.value)} />
+        <input className="input" placeholder="Value" value={value} onChange={(e) => setValue(e.target.value)} onKeyDown={(e) => e.key === "Enter" && clean && save(clean, value).then(() => { setKey(""); setValue(""); })} />
+        <button className="btn btn-primary" disabled={!clean} onClick={() => save(clean, value).then(() => { setKey(""); setValue(""); })}>Add Field</button>
+      </div>
+      {rows.length === 0 ? (
+        <p className="mc-empty" style={{ padding: "14px 0 0" }}>No bot fields yet.</p>
+      ) : (
+        <table className="mc-table st-table">
+          <thead>
+            <tr><th className="col-menu" /><th>Field</th><th>Value</th><th>Updated</th></tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.key} className="is-static">
+                <td className="col-menu">
+                  <RowMenu
+                    label={`Actions for ${r.key}`}
+                    items={[
+                      { label: "Edit value", onSelect: () => edit(r) },
+                      { label: "Delete", onSelect: () => remove(r.key), danger: true },
+                    ]}
+                  />
+                </td>
+                <td><span className="cell-name">{r.key}</span> <code className="st-code">{`{{bot.${r.key}}}`}</code></td>
+                <td>{r.value || <span className="cell-muted">empty</span>}</td>
+                <td className="cell-muted">{relativeTime(r.updated_at)}</td>
               </tr>
             ))}
           </tbody>

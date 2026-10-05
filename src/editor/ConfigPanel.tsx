@@ -142,7 +142,7 @@ function TriggerFields({
       {fields.mediaId && (
         <div>
           <label className="label">Which post</label>
-          <PostPicker value={cfg.mediaId ?? ""} onChange={(id) => onConfig({ mediaId: id })} />
+          <PostPicker value={cfg.mediaId ?? ""} nextAfter={cfg.nextPostAfter} onChange={onConfig} />
         </div>
       )}
 
@@ -342,6 +342,7 @@ function NodeFields({ node, onChange }: { node: FlowNode; onChange: (patch: Part
             <div>
               <label className="label">Value</label>
               <input className="input" placeholder="state.user_reply" value={node.left ?? ""} onChange={(e) => onChange({ left: e.target.value })} />
+              <span className="mono">state.x is a reply saved in this run, contact.x a contact field, bot.x a bot field.</span>
             </div>
           )}
           <div>
@@ -665,16 +666,24 @@ function CollectFields({ node, onChange }: { node: FlowNode; onChange: (patch: P
   );
 }
 
+// Manychat's action list (Contact data, Automation, Inbox), minus the Messenger-only and
+// ads/integration ones.
 const ACTION_KINDS: { value: ActionKind; label: string }[] = [
   { value: "add_tag", label: "Add a tag" },
   { value: "remove_tag", label: "Remove a tag" },
-  { value: "set_field", label: "Set a field" },
-  { value: "clear_field", label: "Clear a field" },
-  { value: "assign", label: "Assign the conversation" },
-  { value: "mark_done", label: "Mark conversation done" },
-  { value: "notify", label: "Notify an admin (internal note)" },
+  { value: "set_field", label: "Set a contact field" },
+  { value: "clear_field", label: "Clear a contact field" },
+  { value: "opt_in", label: "Opt in to broadcasts and sequences" },
+  { value: "opt_out", label: "Opt out of broadcasts and sequences" },
+  { value: "delete_contact", label: "Delete the contact" },
+  { value: "set_bot_field", label: "Set a bot field" },
   { value: "subscribe_sequence", label: "Subscribe to a sequence" },
   { value: "unsubscribe_sequence", label: "Unsubscribe from a sequence" },
+  { value: "log_conversion", label: "Log a conversion event" },
+  { value: "mark_open", label: "Mark conversation open" },
+  { value: "mark_done", label: "Mark conversation done" },
+  { value: "assign", label: "Assign the conversation" },
+  { value: "notify", label: "Notify an admin (internal note)" },
 ];
 
 /** Action node: an ordered list of things to do (tags, fields, assign, notify) — no message. */
@@ -682,7 +691,9 @@ function ActionFields({ node, onChange }: { node: FlowNode; onChange: (patch: Pa
   const [tags, setTags] = useState<string[]>([]);
   const [fields, setFields] = useState<string[]>([]);
   const [sequences, setSequences] = useState<{ id: string; name: string }[]>([]);
+  const [botFields, setBotFields] = useState<string[]>([]);
   useEffect(() => {
+    supabase.from("bot_field").select("key").then(({ data }) => setBotFields((data ?? []).map((f) => f.key as string)));
     // Suggestions only: a failed read leaves the lists empty but the fields still accept typing.
     supabase.from("tag").select("name").then(({ data, error }) => {
       if (error) toast.error(error);
@@ -735,6 +746,24 @@ function ActionFields({ node, onChange }: { node: FlowNode; onChange: (patch: Pa
           )}
           {a.kind === "assign" && (
             <input className="input" placeholder="agent@email or name" value={a.assignee ?? ""} onChange={(e) => patch(i, { assignee: e.target.value })} />
+          )}
+          {a.kind === "set_bot_field" && (
+            <>
+              <input className="input" list="known-bot-fields" placeholder="bot field key" value={a.field ?? ""} onChange={(e) => patch(i, { field: e.target.value.trim() })} />
+              <datalist id="known-bot-fields">{botFields.map((f) => <option key={f} value={f} />)}</datalist>
+              <input className="input" placeholder="value (supports {{state.x}})" value={a.value ?? ""} onChange={(e) => patch(i, { value: e.target.value })} />
+              <span className="mono">Shared by every contact. Insert it with {"{{bot.key}}"}.</span>
+            </>
+          )}
+          {a.kind === "log_conversion" && (
+            <>
+              <input className="input" placeholder="Event name, e.g. purchase" value={a.event ?? ""} onChange={(e) => patch(i, { event: e.target.value })} />
+              <input className="input" placeholder="Value (optional), e.g. 250 or {{state.price}}" value={a.value ?? ""} onChange={(e) => patch(i, { value: e.target.value })} />
+              <span className="mono">Counted per automation in the Automations list.</span>
+            </>
+          )}
+          {a.kind === "delete_contact" && (
+            <span className="mono field-warn">Deletes the contact with their messages and history. Nothing after this step runs.</span>
           )}
           {a.kind === "notify" && (
             <input className="input" placeholder="Note for the admin" value={a.message ?? ""} onChange={(e) => patch(i, { message: e.target.value })} />

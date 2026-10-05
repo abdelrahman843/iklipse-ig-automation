@@ -273,6 +273,16 @@ export async function fetchFollowState(
   };
 }
 
+/** The account's latest posts and reels, newest first: id and publish time only. */
+export async function listMedia(limit = 25): Promise<{ id: string; timestamp: string }[]> {
+  const { igUserId } = await credentials();
+  const body = await call(`/${igUserId}/media?fields=id,timestamp&limit=${limit}`, { method: "GET" });
+  return ((body.data ?? []) as Record<string, unknown>[]).map((m) => ({
+    id: String(m.id),
+    timestamp: String(m.timestamp ?? ""),
+  }));
+}
+
 /** Name, username and picture for Live Chat (User Profile API, same rule as above). */
 export async function fetchProfile(igsid: string): Promise<{
   name?: string;

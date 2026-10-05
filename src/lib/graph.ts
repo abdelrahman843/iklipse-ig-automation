@@ -419,6 +419,7 @@ export function triggerSummary(flow: Flow): string {
   const words = keywords.length ? keywords.join(", ") : "any text";
   switch (flow.trigger_type) {
     case "comment":
+      if (config.nextPostAfter && !config.mediaId) return `Comment on your next post — ${words}`;
       return config.mediaId ? `Comment on ${config.mediaId} — ${words}` : `Comment on any post — ${words}`;
     case "keyword":
       return `Direct message — ${words}`;

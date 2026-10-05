@@ -19,14 +19,24 @@ export type ActionKind =
   | "remove_tag"
   | "assign"
   | "mark_done"
+  | "mark_open"
   | "notify"
   | "subscribe_sequence"
-  | "unsubscribe_sequence";
+  | "unsubscribe_sequence"
+  | "opt_in"
+  | "opt_out"
+  | "delete_contact"
+  | "set_bot_field"
+  | "log_conversion";
 
 export interface FlowAction {
   kind: ActionKind;
+  /** set_field / clear_field: the contact field key. set_bot_field: the bot field key. */
   field?: string;
+  /** set_field / set_bot_field: the value. log_conversion: the optional amount. */
   value?: string;
+  /** log_conversion: the event name, e.g. "purchase". */
+  event?: string;
   tag?: string;
   assignee?: string;
   message?: string;
@@ -139,6 +149,9 @@ export type TriggerType =
 export interface TriggerConfig {
   /** comment triggers: the Instagram media id to watch. Empty means any post. */
   mediaId?: string;
+  /** comment triggers, "Next post or reel": set when chosen. Until the first post published after
+   *  this moment exists, the trigger matches nothing; then process-events binds it as mediaId. */
+  nextPostAfter?: string;
   keywords?: string[];
   /** how a keyword must appear in the text */
   match?: "contains" | "exact";
