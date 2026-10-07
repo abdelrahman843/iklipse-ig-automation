@@ -11,7 +11,9 @@ import { NodePicker } from "../editor/NodePicker";
 import { Loader } from "../components/Loader";
 import { friendlyError, toast } from "../components/Toast";
 import { confirmDialog } from "../components/Confirm";
-import { useEditor } from "../editor/store";
+import { useEditor, type StepIssue } from "../editor/store";
+import { IssuesMenu } from "../editor/IssuesMenu";
+import { loadFailures, type Failure } from "../lib/flowFailures";
 import type { Flow, FlowFolder } from "../lib/types";
 
 type Compiled = ReturnType<ReturnType<typeof useEditor.getState>["compile"]>;
@@ -86,6 +88,8 @@ export function FlowEditor() {
   const redo = useEditor((s) => s.redo);
   const canUndo = useEditor((s) => s.past.length > 0);
   const canRedo = useEditor((s) => s.future.length > 0);
+  const setIssues = useEditor((s) => s.setIssues);
+  const [failures, setFailures] = useState<Failure[]>([]);
 
   useEffect(() => {
     (async () => {
@@ -115,12 +119,36 @@ export function FlowEditor() {
 
   // Validate the compiled graph — the same rules Meta enforces silently. Recomputes on any
   // canvas change (nodes/edges are dependencies).
-  const checks = useMemo(() => {
-    if (!flow) return [];
-    return checkFlow({ ...flow, ...compile(), draft: null });
+  const compiled = useMemo(
+    () => (flow ? compile() : null),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [flow, nodes, edges, compile]);
+    [flow, nodes, edges, compile],
+  );
+  const checks = useMemo(
+    () => (flow && compiled ? checkFlow({ ...flow, ...compiled, draft: null }) : []),
+    [flow, compiled],
+  );
   const blocking = checks.filter((c) => c.level === "error");
+
+  // What actually went wrong for contacts this week, so a silent failure has a visible cause.
+  const flowId = flow?.id;
+  useEffect(() => {
+    if (!flowRef.current || !flowId) return;
+    loadFailures(flowRef.current).then(setFailures, () => setFailures([]));
+  }, [flowId]);
+
+  // Hand every problem to the step it belongs to: the canvas marks it and the drawer explains it.
+  useEffect(() => {
+    const rank = { error: 0, failure: 1, warning: 2 };
+    const map: Record<string, StepIssue[]> = {};
+    const add = (id: string, issue: StepIssue) => (map[id] ??= []).push(issue);
+    for (const c of checks) add(c.nodeId ?? "trigger", { level: c.level, message: c.message });
+    for (const f of failures) {
+      if (f.nodeId) add(f.nodeId, { level: f.fixable ? "failure" : "warning", message: f.message, count: f.count, lastAt: f.lastAt });
+    }
+    for (const list of Object.values(map)) list.sort((a, b) => rank[a.level] - rank[b.level]);
+    setIssues(map);
+  }, [checks, failures, setIssues]);
   const dirty = graphDirty || nameDirty;
   const saveFailed = Boolean(failed && failed.rev === rev && failed.name === name);
 
@@ -321,9 +349,6 @@ export function FlowEditor() {
 
   // Edits waiting for Publish: saved to the draft, or typed but not saved yet.
   const unpublished = Boolean(flow.draft) || graphDirty;
-  const issues = checks.length
-    ? checks.map((c) => `${c.nodeId ? c.nodeId + ": " : ""}${c.message}`).join("\n")
-    : "";
 
   return (
     <div className="editor-root">
@@ -364,15 +389,7 @@ export function FlowEditor() {
           <button className="btn btn-quiet" onClick={() => addNote()} title="Add a sticky note">+ Note</button>
           <button className="btn btn-quiet" onClick={undo} disabled={!canUndo} title="Undo (Ctrl+Z)" aria-label="Undo">↶</button>
           <button className="btn btn-quiet" onClick={redo} disabled={!canRedo} title="Redo (Ctrl+Shift+Z)" aria-label="Redo">↷</button>
-          {checks.length > 0 && (
-            <span
-              className={`pill ${blocking.length ? "is-bad" : "is-warning-pill"}`}
-              title={issues}
-              style={blocking.length ? {} : { color: "var(--amber)", borderColor: "#e6c48f", background: "var(--amber-bg)" }}
-            >
-              {blocking.length ? `${blocking.length} problem${blocking.length > 1 ? "s" : ""}` : `${checks.length} note${checks.length > 1 ? "s" : ""}`}
-            </span>
-          )}
+          {compiled && <IssuesMenu checks={checks} failures={failures} graph={compiled.graph} />}
           <span className="editor-divider" aria-hidden="true" />
           <FlowPill status={flow.status} />
           {flow.status === "live" ? (

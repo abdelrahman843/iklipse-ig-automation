@@ -4985,3 +4985,80 @@ a.lc-profile-handle:hover { color: var(--signal); }
 @media (prefers-reduced-motion: reduce) {
   .ct-drawer { animation: none; }
 }
+
+/* A step with problems: the mark on its card. Red = broken or failed for contacts, grey = a note. */
+.node-issue {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--ink-soft);
+  background: var(--amber-bg);
+  border: 1px solid var(--rule-2);
+  border-radius: 8px;
+  padding: 2px 7px;
+  white-space: nowrap;
+  cursor: help;
+}
+.node-issue.is-bad { color: var(--burn); background: var(--burn-bg); border-color: #eec7b8; }
+
+/* The problems list: under the header button in the builder, and at the top of a step's drawer. */
+/* The list hangs from the right end of the toolbar, so it never runs off the screen. */
+.editor-tools { position: relative; }
+.issues-btn { cursor: pointer; font: inherit; }
+.issues-btn.is-bad { color: var(--burn); border-color: var(--burn); background: var(--burn-bg); }
+.issues-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 31;
+  width: min(420px, calc(100vw - 32px));
+  max-height: 70vh;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  box-shadow: var(--shadow-2);
+  padding: 8px;
+}
+.issues-group + .issues-group { margin-top: 8px; }
+.issues-head {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  padding: 6px 8px 4px;
+}
+.issue-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  border-left: 3px solid var(--rule-2);
+  background: transparent;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--ink);
+  cursor: pointer;
+}
+.issue-item + .issue-item { margin-top: 4px; }
+.issue-item:hover, .issue-item:focus-visible { background: var(--inset); }
+.issue-item.is-error, .issue-item.is-failure { border-left-color: var(--burn); }
+.issue-step { display: block; font-weight: 600; font-size: 12px; margin-bottom: 2px; }
+.issue-meta { display: block; margin-top: 3px; font-family: var(--mono); font-size: 10px; color: var(--ink-faint); }
+.drawer-issues { display: flex; flex-direction: column; gap: 6px; }
+.drawer-issue {
+  border-left: 3px solid var(--amber);
+  background: var(--amber-bg);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--ink);
+}
+.drawer-issue.is-error, .drawer-issue.is-failure { border-left-color: var(--burn); background: var(--burn-bg); }
+.drawer-issue b { display: block; font-size: 10px; font-family: var(--mono); letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 2px; }

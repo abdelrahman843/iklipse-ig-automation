@@ -4,6 +4,7 @@ import { triggerMeta } from "../../lib/triggers";
 import { useEditor } from "../store";
 import type { TriggerNodeData } from "../adapter";
 import { IgLogo } from "./icons";
+import { IssueMark } from "./FlowNodeCard";
 
 export function TriggerNode({ data, selected }: NodeProps) {
   const d = data as TriggerNodeData;
@@ -29,6 +30,7 @@ export function TriggerNode({ data, selected }: NodeProps) {
         <div className="text-[13px] font-semibold text-[var(--ink)]">{line}</div>
         <div className="text-[10px] font-mono" style={{ color: "var(--ink-soft)" }}>{sub}</div>
       </div>
+      <IssueMark id="trigger" />
       {entered > 0 && <span className="node-reached" title={`${entered} entered this automation`}>{entered} entered</span>}
       <Handle type="source" position={Position.Bottom} id="start" style={{ height: 10, width: 10, background: accent, borderColor: "#fff", borderWidth: 2 }} />
     </div>

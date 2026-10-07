@@ -1,4 +1,4 @@
-import type { Flow, FlowGraph, FlowNode, NodeType, TriggerType } from "./types";
+import type { Flow, FlowGraph, FlowNode, MessageButton, MessageContent, NodeType, TriggerType } from "./types";
 
 export const NODE_LABEL: Record<NodeType, string> = {
   send_message: "Send message",
@@ -255,6 +255,123 @@ export interface Check {
   message: string;
 }
 
+/** What the builder calls a step: its custom title, else its kind. */
+export function stepLabel(node: FlowNode | undefined, id: string): string {
+  if (id === "trigger") return "Trigger";
+  if (!node) return "A deleted step";
+  return node.title?.trim() || NODE_LABEL[node.type] || id;
+}
+
+const isLink = (url: string) => /^https?:\/\/\S+\.\S+/i.test(url.trim());
+
+function hasContent(c: MessageContent | undefined): boolean {
+  return Boolean(
+    c?.text?.trim() || c?.imageUrl?.trim() || c?.attachment?.url?.trim() || (c?.cards ?? []).length,
+  );
+}
+
+function buttonChecks(buttons: MessageButton[], where: string): Omit<Check, "nodeId">[] {
+  const out: Omit<Check, "nodeId">[] = [];
+  buttons.forEach((b, i) => {
+    const name = b.title?.trim() ? `"${b.title.trim()}"` : `number ${i + 1}`;
+    if (!b.title?.trim()) {
+      out.push({ level: "error", message: `Button ${name}${where} has no title. Instagram refuses a button without one.` });
+    } else if (b.title.trim().length > 20) {
+      out.push({ level: "warning", message: `Button ${name}${where} is over 20 characters. Instagram cuts it short.` });
+    }
+    if (b.url !== undefined && b.url.trim() && !isLink(b.url)) {
+      out.push({ level: "error", message: `Button ${name}${where} has a link that doesn't start with https://. The message won't send.` });
+    }
+  });
+  return out;
+}
+
+/** Per-step content rules: the mistakes that make Instagram refuse the send. */
+function stepChecks(node: FlowNode): Omit<Check, "nodeId">[] {
+  const out: Omit<Check, "nodeId">[] = [];
+  switch (node.type) {
+    case "send_message": {
+      const c = node.content;
+      if (!hasContent(c)) {
+        out.push({ level: "error", message: "This message is empty. Write some text or add an image, so Instagram has something to send." });
+      }
+      const text = c?.text ?? "";
+      const buttons = c?.buttons ?? [];
+      if (buttons.length && text.length > 640) {
+        out.push({ level: "warning", message: `A message with buttons can hold 640 characters. This one has ${text.length}, so the end is cut off.` });
+      } else if (text.length > 1000) {
+        out.push({ level: "warning", message: `Instagram messages hold 1000 characters. This one has ${text.length}, so the end is cut off.` });
+      }
+      if (buttons.length && !text.trim() && !(c?.cards ?? []).length) {
+        out.push({ level: "error", message: "Buttons need text above them. Instagram refuses buttons on their own." });
+      }
+      out.push(...buttonChecks(buttons, ""));
+      (c?.cards ?? []).forEach((card, i) => {
+        if (!card.title?.trim()) out.push({ level: "warning", message: `Card ${i + 1} has no title.` });
+        if (card.imageUrl?.trim() && !isLink(card.imageUrl)) {
+          out.push({ level: "error", message: `Card ${i + 1}'s image link doesn't start with https://. The message won't send.` });
+        }
+        out.push(...buttonChecks(card.buttons ?? [], ` on card ${i + 1}`));
+      });
+      (node.extras ?? []).forEach((extra, i) => {
+        if (!hasContent(extra)) {
+          out.push({ level: "error", message: `Extra bubble ${i + 1} is empty. Write something in it or remove it.` });
+        }
+      });
+      break;
+    }
+    case "collect":
+      if (!node.promptText?.trim()) {
+        out.push({ level: "error", message: "The question is empty. Write what you want to ask." });
+      }
+      break;
+    case "condition": {
+      const byTag = node.op === "has_tag" || node.op === "not_has_tag";
+      if (byTag ? !node.right?.trim() : !node.left?.trim()) {
+        out.push({
+          level: "error",
+          message: byTag ? "Pick the tag this branch checks." : "Choose what this branch checks, for example contact.email or state.reply.",
+        });
+      } else if (!byTag && node.op !== "exists" && node.right === undefined) {
+        out.push({ level: "warning", message: "There's no value to compare with, so this checks against an empty value." });
+      }
+      break;
+    }
+    case "go_to_flow":
+      if (!node.targetFlowId) out.push({ level: "error", message: "Pick the automation to send the contact to." });
+      break;
+    case "http_request":
+      if (!node.url?.trim()) out.push({ level: "error", message: "Enter the address this request calls." });
+      else if (!node.url.includes("{{") && !isLink(node.url)) {
+        out.push({ level: "error", message: "The request address must start with https://." });
+      }
+      break;
+    case "action": {
+      const acts = node.actions ?? [];
+      if (!acts.length) out.push({ level: "warning", message: "This action step does nothing yet. Add an action or remove the step." });
+      acts.forEach((a, i) => {
+        const n = acts.length > 1 ? ` (action ${i + 1})` : "";
+        const missing =
+          (a.kind === "set_field" || a.kind === "clear_field") && !a.field?.trim() ? "Pick the field" :
+          (a.kind === "add_tag" || a.kind === "remove_tag") && !a.tag?.trim() ? "Pick the tag" :
+          a.kind === "assign" && !a.assignee?.trim() ? "Pick who to assign to" :
+          (a.kind === "subscribe_sequence" || a.kind === "unsubscribe_sequence") && !a.sequenceId ? "Pick the sequence" :
+          a.kind === "set_bot_field" && !a.field?.trim() ? "Pick the bot field" :
+          a.kind === "log_conversion" && !a.event?.trim() ? "Name the conversion event" :
+          null;
+        if (missing) out.push({ level: "error", message: `${missing}${n}. Without it this action does nothing.` });
+      });
+      break;
+    }
+    case "randomize":
+      if (!(node.branches ?? []).some((b) => (b.weight || 0) > 0)) {
+        out.push({ level: "error", message: "Every path has 0%. Give at least one path a share." });
+      }
+      break;
+  }
+  return out;
+}
+
 /**
  * The rules Meta enforces silently. Catching them here beats discovering them as a message
  * that never arrives.
@@ -265,11 +382,11 @@ export function checkFlow(flow: Flow): Check[] {
   const nodes = graph?.nodes ?? {};
 
   if (!flow.trigger_type) {
-    checks.push({ level: "error", message: "Choose a trigger before this can go live." });
+    checks.push({ level: "error", nodeId: "trigger", message: "Choose a trigger before this can go live." });
   }
 
   if (!graph?.start || !nodes[graph.start]) {
-    checks.push({ level: "error", message: "This flow has no first step." });
+    checks.push({ level: "error", nodeId: "trigger", message: "Nothing is connected to the trigger. Drag from the trigger to the first step." });
     return checks;
   }
 
@@ -280,7 +397,7 @@ export function checkFlow(flow: Flow): Check[] {
         checks.push({
           level: "error",
           nodeId: id,
-          message: `"${exit.label}" points at ${target}, which no longer exists.`,
+          message: `The "${exit.label}" arrow leads to a step that was deleted. Connect it to another step.`,
         });
       }
     }
@@ -369,6 +486,7 @@ export function checkFlow(flow: Flow): Check[] {
         message: "Instagram shows at most three buttons on a message.",
       });
     }
+    for (const c of stepChecks(node)) checks.push({ ...c, nodeId: id });
   }
 
   // Meta rejects a follow check until the contact has messaged us at least once.
@@ -405,7 +523,7 @@ export function checkFlow(flow: Flow): Check[] {
   walk(graph.start);
   for (const id of Object.keys(nodes)) {
     if (!walked.has(id) && reachable.has(id)) {
-      checks.push({ level: "warning", nodeId: id, message: "No step leads here." });
+      checks.push({ level: "warning", nodeId: id, message: "No path of arrows from the trigger reaches this step, so it never runs. Connect it to a step the trigger leads to, or delete it." });
     }
   }
 

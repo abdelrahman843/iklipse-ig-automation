@@ -1,3 +1,4 @@
+import type { CSSProperties } from "react";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import { CATEGORY_ACCENT, def } from "../nodeDefs";
 import { useEditor } from "../store";
@@ -14,6 +15,24 @@ function Reached({ id }: { id: string }) {
       {n} reached
     </span>
   );
+}
+
+/** A mark on a step that has problems: red when it is broken or failed for contacts, grey for a note. */
+export function IssueMark({ id }: { id: string }) {
+  const issues = useEditor((s) => s.issues[id]);
+  if (!issues?.length) return null;
+  const bad = issues.some((i) => i.level !== "warning");
+  return (
+    <span className={`node-issue${bad ? " is-bad" : ""}`} title={issues.map((i) => `• ${i.message}`).join("\n")}>
+      {bad ? "!" : "i"} {issues.length}
+    </span>
+  );
+}
+
+/** A broken step gets a red outline, so it stands out on a busy canvas. */
+function useIssueRing(id: string): CSSProperties {
+  const bad = useEditor((s) => (s.issues[id] ?? []).some((i) => i.level !== "warning"));
+  return bad ? { borderColor: "var(--burn)", boxShadow: "0 0 0 3px var(--burn-bg)" } : {};
 }
 
 /** Nodes that speak to the contact are drawn as a real Instagram message, not a generic box. */
@@ -125,7 +144,8 @@ export function FlowNodeCard({ id, data, selected }: NodeProps) {
   const title = d.flowNode.title?.trim() || definition.name;
   const n = d.flowNode;
 
-  const ring = selected ? { borderColor: accent, boxShadow: `0 0 0 3px ${accent}22` } : {};
+  const issueRing = useIssueRing(id);
+  const ring = selected ? { borderColor: accent, boxShadow: `0 0 0 3px ${accent}22` } : issueRing;
 
   // ---- message-preview nodes (send_message, collect) ----
   if (PREVIEW.has(d.nodeType)) {
@@ -146,6 +166,7 @@ export function FlowNodeCard({ id, data, selected }: NodeProps) {
             <div className="text-[10px] text-[var(--ink-faint)]">Instagram</div>
             <div className="text-[13px] font-semibold text-[var(--ink)] truncate mt-0.5">{title}</div>
           </div>
+          <IssueMark id={id} />
           <Reached id={id} />
           <IgChat />
         </div>
@@ -198,7 +219,8 @@ export function FlowNodeCard({ id, data, selected }: NodeProps) {
       <div className="flex items-center gap-2 px-3 py-2.5 border-b" style={{ borderColor: "var(--rule)" }}>
         <span className="grid place-items-center h-6 w-6 rounded-[7px]" style={{ background: `${accent}1e` }}>{NODE_ICON[d.nodeType]}</span>
         <span className="text-[13px] font-semibold text-[var(--ink)] leading-tight flex-1 truncate">{title}</span>
-        <Reached id={id} />
+        <IssueMark id={id} />
+          <Reached id={id} />
         {definition.pauses && <span className="text-[9px] uppercase tracking-wider font-mono" style={{ color: "var(--burn)" }}>pauses</span>}
       </div>
       <div className="px-3 py-2 text-[11px] leading-snug min-h-[16px] break-words" style={{ color: "var(--ink-soft)" }}>{summary(d)}</div>

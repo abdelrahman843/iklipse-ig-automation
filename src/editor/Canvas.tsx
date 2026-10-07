@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Background,
   BackgroundVariant,
@@ -40,7 +40,18 @@ export function Canvas() {
   const addNodeConnected = useEditor((s) => s.addNodeConnected);
   const select = useEditor((s) => s.select);
 
-  const { screenToFlowPosition } = useReactFlow();
+  const { screenToFlowPosition, getNode, getZoom, setCenter } = useReactFlow();
+
+  // "Show me" from the problems list: bring the step into the middle of the canvas.
+  const focusReq = useEditor((s) => s.focusReq);
+  useEffect(() => {
+    if (!focusReq) return;
+    const n = getNode(focusReq.id);
+    if (!n) return;
+    const w = n.measured?.width ?? 240;
+    const h = n.measured?.height ?? 120;
+    void setCenter(n.position.x + w / 2, n.position.y + h / 2, { zoom: Math.max(getZoom(), 0.9), duration: 400 });
+  }, [focusReq, getNode, getZoom, setCenter]);
   const dragFrom = useRef<{ source: string; handle: string } | null>(null);
   const [menu, setMenu] = useState<ConnectMenu | null>(null);
 

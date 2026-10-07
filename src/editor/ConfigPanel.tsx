@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useState } from "react";
-import { useEditor } from "./store";
+import { useEditor, type StepIssue } from "./store";
 import { def } from "./nodeDefs";
-import { describeDelay } from "../lib/time";
+import { describeDelay, relativeTime } from "../lib/time";
 import { supabase } from "../lib/supabase";
 import { Select } from "../components/Select";
 import { PostPicker } from "./PostPicker";
@@ -11,6 +11,28 @@ import { ImageField } from "../components/ImageField";
 import { LINK_IN_TEXT_HINT, linkInText, SHORTENED_LINK_HINT, shortenedLink, weakPublicReply, weakReplySet } from "../lib/spamHints";
 import type { FlowNodeData, TriggerNodeData } from "./adapter";
 import type { ActionKind, FlowAction, FlowNode, InputType, MessageButton, TriggerConfig, TriggerType } from "../lib/types";
+
+const ISSUE_HEAD: Record<StepIssue["level"], string> = {
+  error: "Fix this",
+  failure: "Failed for contacts",
+  warning: "Worth a look",
+};
+
+/** What's wrong with this step, spelled out where it gets fixed. */
+function StepIssues({ id }: { id: string }) {
+  const issues = useEditor((s) => s.issues[id]);
+  if (!issues?.length) return null;
+  return (
+    <div className="drawer-issues" role="alert">
+      {issues.map((i, k) => (
+        <div key={k} className={`drawer-issue is-${i.level}`}>
+          <b>{ISSUE_HEAD[i.level]}{i.count ? ` · ${i.count}×, last ${relativeTime(i.lastAt ?? null)}` : ""}</b>
+          {i.message}
+        </div>
+      ))}
+    </div>
+  );
+}
 
 /** Slide-in drawer from the left with the selected node's settings. Empty when nothing is picked. */
 export function ConfigPanel() {
@@ -49,6 +71,7 @@ export function ConfigPanel() {
       )}
 
       <div className="drawer-body stack" style={{ gap: 16 }}>
+        <StepIssues id={selected.id} />
         {isTrigger ? (
           <TriggerFields
             data={selected.data as TriggerNodeData}

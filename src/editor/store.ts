@@ -27,6 +27,18 @@ interface Snapshot {
 
 const HISTORY_LIMIT = 50;
 
+/**
+ * One thing wrong with a step. "error" blocks going live, "warning" is worth a look, and
+ * "failure" is something that actually went wrong for contacts recently.
+ */
+export interface StepIssue {
+  level: "error" | "warning" | "failure";
+  message: string;
+  /** failures: how many times, and when it last happened. */
+  count?: number;
+  lastAt?: string;
+}
+
 interface EditorState {
   nodes: Node[];
   edges: Edge[];
@@ -40,9 +52,16 @@ interface EditorState {
   /** How many contacts reached each node (node id -> count), and how many entered the flow. */
   stats: Record<string, number>;
   entered: number;
+  /** Problems per step id ("trigger" for the trigger), drawn on the canvas and in the drawer. */
+  issues: Record<string, StepIssue[]>;
+  /** A request to scroll the canvas to a step; `n` changes on every request. */
+  focusReq: { id: string; n: number } | null;
 
   init: (flow: Flow) => void;
   setStats: (stats: Record<string, number>, entered: number) => void;
+  setIssues: (issues: Record<string, StepIssue[]>) => void;
+  /** Selects a step and scrolls the canvas to it. */
+  focus: (id: string) => void;
   onNodesChange: (changes: NodeChange[]) => void;
   onEdgesChange: (changes: EdgeChange[]) => void;
   onConnect: (conn: Connection) => void;
@@ -89,13 +108,17 @@ export const useEditor = create<EditorState>((set, get) => ({
   coalescingEdit: false,
   stats: {},
   entered: 0,
+  issues: {},
+  focusReq: null,
 
   init: (flow) => {
     const { nodes, edges } = toReactFlow(flow);
-    set({ nodes, edges, selectedId: null, dirty: false, past: [], future: [], coalescingEdit: false });
+    set({ nodes, edges, selectedId: null, dirty: false, past: [], future: [], coalescingEdit: false, issues: {} });
   },
 
   setStats: (stats, entered) => set({ stats, entered }),
+  setIssues: (issues) => set({ issues }),
+  focus: (id) => set({ selectedId: id, focusReq: { id, n: (get().focusReq?.n ?? 0) + 1 } }),
 
   checkpoint: (isEdit = false) => {
     // Coalesce a run of config edits into a single undo step.
