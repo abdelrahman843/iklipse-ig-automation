@@ -463,16 +463,20 @@ export function checkFlow(flow: Flow): Check[] {
     } else if (first?.type === "send_message") {
       // A single message is right, but it still has to be answerable — otherwise nothing follows.
       // A button that opens a link leaves Instagram without opening the window, so it does not count.
+      // A lone message has nothing waiting on a reply, so it's fine as it is.
       const opensWindow = (first.content?.buttons ?? []).some((b) => !b.url);
       const asksSomething = (first.content?.text ?? "").includes("?");
-      if (!opensWindow && !asksSomething) {
+      const followed = exits(first).some((e) => first[e.key]);
+      if (followed && !opensWindow && !asksSomething) {
         checks.push({
           level: "error",
           nodeId: graph.start,
           message:
-            "The first message needs a question or a button that replies. A private reply does " +
-            "not open the 24-hour window on its own, and a link button leaves Instagram without " +
-            "opening it, so nothing after this step can send.",
+            "The steps after this message will never send. Instagram lets you send a commenter " +
+            "only this one message until they reply, and nothing here gets them to reply: the " +
+            "link button opens a browser instead. Add a button that replies (leave its link " +
+            "empty, for example \"Send it\") and move the link to the next message, or delete " +
+            "the steps after this one.",
         });
       }
     }
