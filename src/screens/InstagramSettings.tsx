@@ -261,11 +261,11 @@ function SendingSafety() {
       <SettingRow
         title="Speed limits"
         about={
-          `DMs to commenters: ${l.private_reply.minute} a minute. ` +
-          `Replies under comments: ${l.public_reply.minute} a minute, ${l.public_reply.hour} an hour. ` +
-          `Broadcasts and sequences: ${l.proactive.hour} an hour. ` +
+          `DMs to commenters: ${l.private_reply.hour} an hour, ${l.private_reply.minute} a minute (Meta allows 750 an hour). ` +
+          `Replies under comments: ${l.public_reply.hour} an hour, ${l.public_reply.minute} a minute. ` +
+          `Replies and broadcasts in DMs: ${l.reactive.hour.toLocaleString()} an hour (Meta allows 100 a second). ` +
           `Any one contact: ${l.per_contact_hour} messages an hour. ` +
-          "The DM to a commenter waits 10–45 seconds and the reply under the comment 30–120 seconds, as a person would. " +
+          "The DM to a commenter waits 4–12 seconds and the reply under the comment 10–40 seconds, as a person would. " +
           "Anything over a limit waits for the next minute rather than going out in a burst."
         }
       >

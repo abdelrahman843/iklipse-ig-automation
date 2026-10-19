@@ -1,14 +1,16 @@
 // Drains send_queue without ever sending like a bot. Runs every minute from pg_cron and the moment
 // a row is queued.
 //
-// The limits live in the send_guard row (migration 24) and claim_send_batch() applies them while
-// claiming, so a row past its budget is never even picked up:
-//   reactive       a reply to something the contact just did      30/min, 600/h
-//   private_reply  the one DM a comment allows                     12/min (ManyChat's own cap), 720/h
-//   public_reply   a reply posted under a comment                  2/min, 30/h; off for a day when a
-//                                                                  post goes viral (send_guard_tick)
-//   proactive      broadcasts and sequence messages                4/min, 200/h
+// The limits live in the send_guard row (migration 27: Meta's published numbers, 5% under) and
+// claim_send_batch() applies them while claiming, so a row past its budget is never even picked up:
+//   reactive       a reply to something the contact just did      95/s (Meta: 100/s)
+//   private_reply  the one DM a comment allows                     12/min, 712/h (Meta: 750/h)
+//   public_reply   a reply posted under a comment                  12/min, 712/h; off for a day when
+//                                                                  a post passes that (send_guard_tick)
+//   proactive      broadcasts and sequence messages                95/s (Meta: 100/s)
 //   per contact    25 messages an hour
+// One claim takes at most send_guard.limits.batch rows; whatever a run can't send before its
+// deadline goes back to pending for the next run.
 // Replies to someone waiting go out at once; everything else is spaced a few seconds apart.
 // A comment reply held by its short "human" pause is sent the moment the pause ends: one worker
 // at a time (the send_guard.waiting_until lease) stays up for WAIT_BUDGET_MS polling for it.
@@ -35,6 +37,8 @@ const USAGE_PAUSE_PERCENT = 80;
 const WAIT_BUDGET_MS = 40_000;
 /** How often the waiting worker looks for rows that fell due (new ones can arrive meanwhile). */
 const POLL_MS = 1_500;
+/** Rows still unsent this long after a run started go back for the next run. */
+const RUN_BUDGET_MS = 50_000;
 
 /** 1m, 2m, 4m, 8m, 16m, capped at an hour. */
 function backoffMs(attempts: number): number {
@@ -149,7 +153,7 @@ interface Round {
 }
 
 /** Claim what the limits allow right now and send it. */
-async function round(): Promise<Round> {
+async function round(deadline: number): Promise<Round> {
   // Viral switch first, so a claim never picks up a reply under a comment it just turned off.
   const { error: tickErr } = await sql.rpc("send_guard_tick");
   if (tickErr) throw new Error(`send_guard_tick failed: ${tickErr.message}`);
@@ -173,6 +177,10 @@ async function round(): Promise<Round> {
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     if (i > 0 && !isReactive(row)) await sleep(gapMs());
+    if (Date.now() > deadline) {
+      await release(rows.slice(i));
+      break;
+    }
 
     try {
       const result = await deliver(row, igsidOf.get(row.contact_id));
@@ -238,7 +246,7 @@ Deno.serve(async (req) => {
   try {
     const expired = await expireStale();
     const total = { sent: 0, claimed: 0, rounds: 1 };
-    let r = await round();
+    let r = await round(started + RUN_BUDGET_MS);
     total.sent += r.sent;
     total.claimed += r.claimed;
 
@@ -252,7 +260,7 @@ Deno.serve(async (req) => {
             await sleep(Math.min(due - Date.now(), POLL_MS));
             continue;
           }
-          r = await round();
+          r = await round(started + RUN_BUDGET_MS);
           total.rounds++;
           total.sent += r.sent;
           total.claimed += r.claimed;
