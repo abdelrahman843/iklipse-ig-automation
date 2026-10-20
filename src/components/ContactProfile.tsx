@@ -82,7 +82,7 @@ export function ContactProfile({
       supabase.from("custom_field").select("key").order("key"),
       supabase.from("tag").select("name").order("name"),
       supabase.from("flow").select("id, name"),
-      supabase.from("app_settings").select("human_pause_minutes").eq("id", 1).maybeSingle(),
+      supabase.from("app_settings").select("human_pause_minutes").maybeSingle(),
     ]).then(([a, s, f, t, fl, st]) => {
       const failed = a.error ?? s.error ?? f.error ?? t.error ?? fl.error;
       if (failed) toast.error(failed);
@@ -182,7 +182,7 @@ export function ContactProfile({
       });
       if (!name) return;
       if (!lists.agents.includes(name)) {
-        const { error } = await supabase.from("agent").upsert({ name }, { onConflict: "name" });
+        const { error } = await supabase.from("agent").upsert({ name }, { onConflict: "workspace_id,name" });
         if (error) return toast.error(error);
         setLists((l) => ({ ...l, agents: [...l.agents, name].sort() }));
       }

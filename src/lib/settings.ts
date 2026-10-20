@@ -9,7 +9,7 @@ let timezone: Promise<string> | null = null;
 
 /** Settings › General's time zone, or this browser's when none is set. Read once, then cached. */
 export function accountTimezone(): Promise<string> {
-  timezone ??= Promise.resolve(supabase.from("app_settings").select("timezone").eq("id", 1).maybeSingle()).then(
+  timezone ??= Promise.resolve(supabase.from("app_settings").select("timezone").maybeSingle()).then(
     ({ data }) => (data?.timezone as string | null) || BROWSER_TZ,
     () => BROWSER_TZ,
   );

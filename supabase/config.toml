@@ -38,3 +38,7 @@ verify_jwt = true
 [functions.broadcast-worker]
 # Called by pg_cron with the service role bearer, like the other workers.
 verify_jwt = true
+
+[functions.admin-accounts]
+# Called by n8n with the x-admin-key shared secret (ADMIN_API_KEY), not a Supabase JWT.
+verify_jwt = false

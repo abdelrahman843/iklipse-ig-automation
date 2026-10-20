@@ -1,5 +1,5 @@
 import { GRAPH_BASE } from "./env.ts";
-import { credentials } from "./account.ts";
+import type { Credentials } from "./account.ts";
 import type { MessageContent } from "./types.ts";
 
 export class MetaError extends Error {
@@ -91,8 +91,8 @@ function safeUrl(url: string): string {
   return url.trim();
 }
 
-async function call(path: string, init: RequestInit): Promise<Record<string, unknown>> {
-  const { token } = await credentials();
+async function call(creds: Credentials, path: string, init: RequestInit): Promise<Record<string, unknown>> {
+  const { token } = creds;
   const res = await fetch(`${GRAPH_BASE()}${path}`, {
     ...init,
     headers: {
@@ -199,9 +199,8 @@ export function buildMessage(content: MessageContent): Record<string, unknown> {
  * A private reply answers one comment, exactly once. It does not open the 24-hour window,
  * so the message it carries must invite a reply.
  */
-export async function sendPrivateReply(commentId: string, content: MessageContent) {
-  const { igUserId } = await credentials();
-  return call(`/${igUserId}/messages`, {
+export function sendPrivateReply(creds: Credentials, commentId: string, content: MessageContent) {
+  return call(creds, `/${creds.igUserId}/messages`, {
     method: "POST",
     body: JSON.stringify({
       recipient: { comment_id: commentId },
@@ -211,9 +210,8 @@ export async function sendPrivateReply(commentId: string, content: MessageConten
 }
 
 /** A normal DM. Only legal inside the 24-hour window. Never carries a message tag. */
-export async function sendDirectMessage(igsid: string, content: MessageContent) {
-  const { igUserId } = await credentials();
-  return call(`/${igUserId}/messages`, {
+export function sendDirectMessage(creds: Credentials, igsid: string, content: MessageContent) {
+  return call(creds, `/${creds.igUserId}/messages`, {
     method: "POST",
     body: JSON.stringify({
       recipient: { id: igsid },
@@ -226,8 +224,7 @@ export async function sendDirectMessage(igsid: string, content: MessageContent) 
  * A message from a human agent. Inside 24h it is a normal DM; between 24h and 7 days it must
  * carry the HUMAN_AGENT tag. Only ever called from the inbox — automation must not use this.
  */
-export async function sendHumanMessage(igsid: string, content: MessageContent, tagged: boolean) {
-  const { igUserId } = await credentials();
+export function sendHumanMessage(creds: Credentials, igsid: string, content: MessageContent, tagged: boolean) {
   const body: Record<string, unknown> = {
     recipient: { id: igsid },
     message: buildMessage(content),
@@ -236,18 +233,18 @@ export async function sendHumanMessage(igsid: string, content: MessageContent, t
     body.messaging_type = "MESSAGE_TAG";
     body.tag = "HUMAN_AGENT";
   }
-  return call(`/${igUserId}/messages`, { method: "POST", body: JSON.stringify(body) });
+  return call(creds, `/${creds.igUserId}/messages`, { method: "POST", body: JSON.stringify(body) });
 }
 
 /** Write Ice Breakers / Persistent Menu via the Messenger Profile API. */
-export function setMessengerProfile(profile: Record<string, unknown>) {
-  return call(`/me/messenger_profile`, { method: "POST", body: JSON.stringify(profile) });
+export function setMessengerProfile(creds: Credentials, profile: Record<string, unknown>) {
+  return call(creds, `/me/messenger_profile`, { method: "POST", body: JSON.stringify(profile) });
 }
 
 /** Take Ice Breakers and/or the Persistent Menu off the account (an empty list is not accepted). */
-export function deleteMessengerProfile(fields: ("ice_breakers" | "persistent_menu")[]) {
+export function deleteMessengerProfile(creds: Credentials, fields: ("ice_breakers" | "persistent_menu")[]) {
   const query = `fields=${encodeURIComponent(JSON.stringify(fields))}&platform=instagram`;
-  return call(`/me/messenger_profile?${query}`, { method: "DELETE" });
+  return call(creds, `/me/messenger_profile?${query}`, { method: "DELETE" });
 }
 
 /**
@@ -255,8 +252,8 @@ export function deleteMessengerProfile(fields: ("ice_breakers" | "persistent_men
  * from the private reply DM — it shows up publicly beneath the comment, so keep it short and
  * generic ("Sent! Check your DMs"). Never carries personal data.
  */
-export function replyToComment(commentId: string, message: string) {
-  return call(`/${commentId}/replies`, { method: "POST", body: JSON.stringify({ message }) });
+export function replyToComment(creds: Credentials, commentId: string, message: string) {
+  return call(creds, `/${commentId}/replies`, { method: "POST", body: JSON.stringify({ message }) });
 }
 
 /**
@@ -264,9 +261,10 @@ export function replyToComment(commentId: string, message: string) {
  * after their first reply.
  */
 export async function fetchFollowState(
+  creds: Credentials,
   igsid: string,
 ): Promise<{ follows: boolean; username?: string }> {
-  const body = await call(`/${igsid}?fields=is_user_follow_business,username`, { method: "GET" });
+  const body = await call(creds, `/${igsid}?fields=is_user_follow_business,username`, { method: "GET" });
   return {
     follows: body.is_user_follow_business === true,
     username: typeof body.username === "string" ? body.username : undefined,
@@ -274,9 +272,8 @@ export async function fetchFollowState(
 }
 
 /** The account's latest posts and reels, newest first: id and publish time only. */
-export async function listMedia(limit = 25): Promise<{ id: string; timestamp: string }[]> {
-  const { igUserId } = await credentials();
-  const body = await call(`/${igUserId}/media?fields=id,timestamp&limit=${limit}`, { method: "GET" });
+export async function listMedia(creds: Credentials, limit = 25): Promise<{ id: string; timestamp: string }[]> {
+  const body = await call(creds, `/${creds.igUserId}/media?fields=id,timestamp&limit=${limit}`, { method: "GET" });
   return ((body.data ?? []) as Record<string, unknown>[]).map((m) => ({
     id: String(m.id),
     timestamp: String(m.timestamp ?? ""),
@@ -284,13 +281,13 @@ export async function listMedia(limit = 25): Promise<{ id: string; timestamp: st
 }
 
 /** Name, username and picture for Live Chat (User Profile API, same rule as above). */
-export async function fetchProfile(igsid: string): Promise<{
+export async function fetchProfile(creds: Credentials, igsid: string): Promise<{
   name?: string;
   username?: string;
   profile_pic?: string;
   follows: boolean;
 }> {
-  const body = await call(`/${igsid}?fields=name,username,profile_pic,is_user_follow_business`, { method: "GET" });
+  const body = await call(creds, `/${igsid}?fields=name,username,profile_pic,is_user_follow_business`, { method: "GET" });
   const str = (v: unknown) => (typeof v === "string" && v ? v : undefined);
   return {
     name: str(body.name),

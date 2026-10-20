@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Navigate, NavLink, useParams } from "react-router-dom";
 import { supabase } from "../lib/supabase";
+import { setWorkspaceName, useWorkspace, workspaceId } from "../lib/workspace";
+import { changePassword } from "../lib/auth";
 import { loadFlowRefs, renameInFlows, usage } from "../lib/references";
 import { BROWSER_TZ, forgetAccountTimezone } from "../lib/settings";
 import { relativeTime } from "../lib/time";
@@ -18,6 +20,7 @@ const TABS = [
   { id: "team", label: "Team" },
   { id: "fields", label: "Fields" },
   { id: "tags", label: "Tags" },
+  { id: "account", label: "Account" },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
@@ -53,6 +56,7 @@ export function Settings() {
             </>
           )}
           {id === "tags" && <TagsTab />}
+          {id === "account" && <AccountTab />}
         </div>
       </div>
     </>
@@ -74,12 +78,12 @@ function Panel({ title, about, children, right }: { title: string; about?: React
   );
 }
 
-/** The single settings row (id = 1), saved field by field. */
+/** The workspace's settings row, saved field by field. */
 function useAppSettings() {
   const [row, setRow] = useState<{ timezone: string | null; human_pause_minutes: number } | null>(null);
   const [state, setState] = useState<"idle" | "saving" | "saved" | "failed">("idle");
   useEffect(() => {
-    supabase.from("app_settings").select("timezone, human_pause_minutes").eq("id", 1).maybeSingle().then(({ data, error }) => {
+    supabase.from("app_settings").select("timezone, human_pause_minutes").maybeSingle().then(({ data, error }) => {
       if (error) toast.error(error);
       setRow(data ?? { timezone: null, human_pause_minutes: 30 });
     });
@@ -88,7 +92,10 @@ function useAppSettings() {
     const before = row;
     setRow((r) => (r ? { ...r, ...patch } : r));
     setState("saving");
-    const { error } = await supabase.from("app_settings").update({ ...patch, updated_at: new Date().toISOString() }).eq("id", 1);
+    const { error } = await supabase
+      .from("app_settings")
+      .update({ ...patch, updated_at: new Date().toISOString() })
+      .eq("workspace_id", await workspaceId());
     if (error) {
       setRow(before);
       setState("failed");
@@ -292,7 +299,7 @@ function TeamTab() {
   async function add() {
     const n = name.trim();
     if (!n) return;
-    const { error } = await supabase.from("agent").upsert({ name: n }, { onConflict: "name" });
+    const { error } = await supabase.from("agent").upsert({ name: n }, { onConflict: "workspace_id,name" });
     if (error) return toast.error(error);
     setName("");
     load();
@@ -302,7 +309,7 @@ function TeamTab() {
     const next = await promptDialog({ title: `Rename ${old}`, initial: old, confirmLabel: "Rename" });
     if (!next || next === old) return;
     try {
-      const up = await supabase.from("agent").upsert({ name: next }, { onConflict: "name" });
+      const up = await supabase.from("agent").upsert({ name: next }, { onConflict: "workspace_id,name" });
       if (up.error) throw up.error;
       const c = await supabase.from("contact").update({ assigned_to: next }).eq("assigned_to", old);
       if (c.error) throw c.error;
@@ -412,7 +419,7 @@ function FieldsTab() {
 
   async function add() {
     if (!clean) return;
-    const { error } = await supabase.from("custom_field").upsert({ key: clean, type }, { onConflict: "key" });
+    const { error } = await supabase.from("custom_field").upsert({ key: clean, type }, { onConflict: "workspace_id,key" });
     if (error) return toast.error(error);
     setKey("");
     toast.success(`Field “${clean}” added`);
@@ -493,7 +500,7 @@ function BotFieldsPanel() {
 
   /** True when it landed, so the add form only clears what was actually saved. */
   async function save(k: string, v: string): Promise<boolean> {
-    const { error } = await supabase.from("bot_field").upsert({ key: k, value: v, updated_at: new Date().toISOString() }, { onConflict: "key" });
+    const { error } = await supabase.from("bot_field").upsert({ key: k, value: v, updated_at: new Date().toISOString() }, { onConflict: "workspace_id,key" });
     if (error) {
       toast.error(error);
       return false;
@@ -598,7 +605,7 @@ function TagsTab() {
   async function add() {
     const n = name.trim();
     if (!n) return;
-    const { error } = await supabase.from("tag").upsert({ name: n }, { onConflict: "name" });
+    const { error } = await supabase.from("tag").upsert({ name: n }, { onConflict: "workspace_id,name" });
     if (error) return toast.error(error);
     setName("");
     load();
@@ -677,5 +684,98 @@ function TagsTab() {
         </table>
       )}
     </Panel>
+  );
+}
+
+// ================================================================ Account
+
+const MIN_PASSWORD = 10;
+
+function AccountTab() {
+  const { workspace } = useWorkspace();
+  const [name, setName] = useState<string | null>(null);
+  const [nameState, setNameState] = useState<"idle" | "saving" | "saved" | "failed">("idle");
+  const [current, setCurrent] = useState("");
+  const [next, setNext] = useState("");
+  const [again, setAgain] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  if (!workspace) return <Loader label="Loading account" />;
+  const canRename = workspace.role === "owner" || workspace.role === "admin";
+  const shownName = name ?? workspace.name;
+
+  async function rename() {
+    const clean = shownName.trim();
+    if (!workspace || !clean || clean === workspace.name) return setName(null);
+    setNameState("saving");
+    const { error } = await supabase.from("workspace").update({ name: clean }).eq("id", workspace.id);
+    if (error) {
+      setNameState("failed");
+      return toast.error(error);
+    }
+    setWorkspaceName(clean);
+    setNameState("saved");
+    toast.success("Workspace renamed. The menu shows the new name after a reload.");
+  }
+
+  async function savePassword(e: React.FormEvent) {
+    e.preventDefault();
+    if (busy || !workspace) return;
+    if (next.length < MIN_PASSWORD) return toast.error(`Use at least ${MIN_PASSWORD} characters.`);
+    if (next !== again) return toast.error("The new passwords don't match.");
+    if (next === current) return toast.error("Pick a password different from your current one.");
+    setBusy(true);
+    try {
+      const { error } = await changePassword(workspace.username, current, next);
+      if (error) return toast.error(error);
+      setCurrent("");
+      setNext("");
+      setAgain("");
+      toast.success("Password changed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <Panel
+        title="Workspace"
+        about="Everything here (automations, contacts, conversations, the connected Instagram account) belongs to this workspace only. Other workspaces can't see it."
+        right={canRename ? <SaveState state={nameState} /> : undefined}
+      >
+        <div className="st-form">
+          <label className="label" htmlFor="ws-name">Name</label>
+          <input
+            id="ws-name"
+            className="input"
+            value={shownName}
+            maxLength={80}
+            disabled={!canRename}
+            onChange={(e) => setName(e.target.value)}
+            onBlur={rename}
+            onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
+          />
+          <label className="label" htmlFor="ws-user">Username</label>
+          <input id="ws-user" className="input" value={`@${workspace.username}`} readOnly disabled />
+          <p className="st-panel-about">Your admin creates logins and can reset a forgotten password.</p>
+        </div>
+      </Panel>
+
+      <Panel title="Password" about="Signing in with the new password works right away; devices already signed in stay signed in.">
+        <form className="st-form" onSubmit={savePassword}>
+          <input type="text" name="username" autoComplete="username" value={workspace.username} readOnly hidden />
+          <label className="label" htmlFor="pw-current">Current password</label>
+          <input id="pw-current" className="input" type="password" autoComplete="current-password" value={current} onChange={(e) => setCurrent(e.target.value)} required />
+          <label className="label" htmlFor="pw-next">New password</label>
+          <input id="pw-next" className="input" type="password" autoComplete="new-password" minLength={MIN_PASSWORD} value={next} onChange={(e) => setNext(e.target.value)} required />
+          <label className="label" htmlFor="pw-again">New password again</label>
+          <input id="pw-again" className="input" type="password" autoComplete="new-password" minLength={MIN_PASSWORD} value={again} onChange={(e) => setAgain(e.target.value)} required />
+          <div>
+            <button className={`btn btn-primary ${busy ? "is-busy" : ""}`} type="submit" disabled={busy}>Change password</button>
+          </div>
+        </form>
+      </Panel>
+    </>
   );
 }

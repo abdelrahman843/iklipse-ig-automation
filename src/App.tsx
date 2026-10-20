@@ -12,13 +12,10 @@ import { Settings } from "./screens/Settings";
 import { ConversationStarters, MainMenu } from "./screens/InstagramSettings";
 import { Login } from "./screens/Login";
 import { signOut, useSession } from "./lib/auth";
+import { useWorkspace } from "./lib/workspace";
 import { Toaster } from "./components/Toast";
 import { ConfirmHost } from "./components/Confirm";
 import { Loader } from "./components/Loader";
-
-// Temporary escape hatch: with VITE_DISABLE_AUTH=true the login gate is skipped and the panel
-// opens directly. RLS falls back to anon (see migration 9). Set it back to false to re-gate.
-const AUTH_DISABLED = import.meta.env.VITE_DISABLE_AUTH === "true";
 
 // Each section gets its own colored, duotone icon — the panel's visual vocabulary.
 const NAV = [
@@ -119,7 +116,8 @@ function readRailOpen(): boolean {
 }
 
 export function App() {
-  const { session, loading, recovery } = useSession();
+  const { session, loading } = useSession();
+  const { workspace, loading: wsLoading, error: wsError, retry } = useWorkspace(Boolean(session));
   const location = useLocation();
   const [railOpen, setRailOpen] = useState(readRailOpen);
   // Phones: the rail becomes a drawer behind a menu button.
@@ -153,7 +151,7 @@ export function App() {
   const inEditor = /^\/flows\/[^/]+$/.test(location.pathname);
 
   // Wait for the stored session to load, so a signed-in user never flashes the login screen.
-  if (!AUTH_DISABLED && loading) {
+  if (loading) {
     return (
       <div className="gate">
         <Loader label="Loading" />
@@ -161,10 +159,31 @@ export function App() {
     );
   }
 
-  // A recovery link must reach the set-a-new-password form even though it carries a session.
-  if (!AUTH_DISABLED && (!session || recovery)) return <Login recovery={recovery} />;
+  if (!session) return <Login />;
 
-  const who = session?.user.email ?? "Auth off";
+  // Every screen reads inside the login's workspace; nothing renders before it is known.
+  if (wsLoading || wsError || !workspace) {
+    return (
+      <div className="gate">
+        {wsLoading ? (
+          <Loader label="Opening your workspace" />
+        ) : (
+          <div className="gate-card">
+            <h1 className="gate-title">{wsError ? "Can't open your workspace" : "No workspace"}</h1>
+            <p className="gate-hint">
+              {wsError
+                ? "The server didn't answer. Check your connection, then try again."
+                : "This login isn't linked to a workspace. Ask your admin."}
+            </p>
+            <div className="gate-links">
+              {Boolean(wsError) && <button className="btn btn-primary" onClick={retry}>Try again</button>}
+              <button className="btn-quiet" onClick={() => signOut()}>Sign out</button>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   const routes = (
     <Routes>
@@ -238,8 +257,14 @@ export function App() {
         </div>
 
         <div className="rail-foot">
-          <div className="rail-who" title={who}>{who}</div>
-          {session && <button className="btn-quiet rail-label" onClick={() => signOut()}>Sign out</button>}
+          <div className="rail-ws" title={`${workspace.name} · @${workspace.username}`}>
+            <span className="rail-ws-badge" aria-hidden="true">{workspace.name.trim().charAt(0).toUpperCase() || "W"}</span>
+            <span className="rail-ws-text">
+              <span className="rail-ws-name">{workspace.name}</span>
+              <span className="rail-who">@{workspace.username}</span>
+            </span>
+          </div>
+          <button className="btn-quiet rail-label" onClick={() => signOut()}>Sign out</button>
         </div>
       </nav>
 

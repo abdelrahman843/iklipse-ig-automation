@@ -37,9 +37,8 @@ function authorizeUrl(state: string): string {
 /** POST to the ig-oauth function as the signed-in user. */
 export async function callOauth(action: "start" | "disconnect" | "resubscribe"): Promise<Record<string, unknown>> {
   const { data } = await supabase.auth.getSession();
-  // Auth may be disabled (no session). Fall back to the anon key; the function only accepts it
-  // when its ALLOW_ANON secret is set.
-  const bearer = data.session?.access_token ?? (import.meta.env.VITE_SUPABASE_ANON_KEY as string);
+  const bearer = data.session?.access_token;
+  if (!bearer) throw new Error("Your session expired. Sign in again.");
   let res: Response;
   try {
     res = await fetch(REDIRECT!, {

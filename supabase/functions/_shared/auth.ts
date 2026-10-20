@@ -1,7 +1,8 @@
 // Caller checks shared by every function.
 //
 // Two kinds of caller exist:
-//   * the panel (a person)  -> requireUser: a real Supabase session, verified with auth.getUser.
+//   * the panel (a person)  -> requireMember: a real Supabase session, verified with auth.getUser,
+//                              plus the workspace that login belongs to.
 //   * cron / other workers  -> requireService: the service-role JWT. These functions run with
 //                              verify_jwt = true, so the gateway has already checked the
 //                              signature and reading the role claim is safe.
@@ -25,25 +26,34 @@ function claims(jwt: string): Record<string, unknown> | null {
   }
 }
 
+/** The signed-in person calling a panel endpoint, and the workspace everything they do is scoped to. */
+export interface Member {
+  userId: string;
+  workspaceId: string;
+  role: string;
+}
+
 /**
- * Panel-only endpoints. Returns an error Response to send back, or null when the caller is a
- * signed-in user.
- *
- * ALLOW_ANON=true (an Edge Function secret) is the explicit escape hatch for running the panel
- * with the login gate off (VITE_DISABLE_AUTH=true). The anon key is public, so in that mode these
- * endpoints are public too — that is the honest cost of turning the gate off.
+ * Panel-only endpoints. Returns the caller's membership, or an error Response to send back.
+ * Every query the endpoint makes afterwards must be scoped to member.workspaceId: these
+ * functions use the service role, which RLS does not filter.
  */
-export async function requireUser(
+export async function requireMember(
   req: Request,
   sql: SupabaseClient,
   headers: Record<string, string> = {},
-): Promise<Response | null> {
-  if (Deno.env.get("ALLOW_ANON") === "true") return null;
+): Promise<Member | Response> {
   const jwt = bearer(req);
   if (!jwt) return json({ error: "Not signed in" }, 401, headers);
   const { data, error } = await sql.auth.getUser(jwt);
   if (error || !data?.user) return json({ error: "Your session expired. Sign in again." }, 401, headers);
-  return null;
+  const { data: m } = await sql
+    .from("workspace_member")
+    .select("workspace_id, role")
+    .eq("user_id", data.user.id)
+    .maybeSingle();
+  if (!m) return json({ error: "This login has no workspace. Ask your admin." }, 403, headers);
+  return { userId: data.user.id, workspaceId: m.workspace_id, role: m.role };
 }
 
 /** Worker endpoints (cron + kick). Anyone holding the public anon key must not reach them. */

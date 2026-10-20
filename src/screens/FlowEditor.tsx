@@ -222,7 +222,7 @@ export function FlowEditor() {
       .filter((n) => n.type === "collect" && (n.saveTo ?? "").trim())
       .map((n) => ({ key: (n.saveTo as string).trim(), type: n.inputType ?? "text" }));
     if (fields.length) {
-      const { error } = await supabase.from("custom_field").upsert(fields, { onConflict: "key" });
+      const { error } = await supabase.from("custom_field").upsert(fields, { onConflict: "workspace_id,key" });
       // Once per visit: auto-save would otherwise repeat it every few seconds.
       if (error && !fieldsWarned.current) {
         fieldsWarned.current = true;

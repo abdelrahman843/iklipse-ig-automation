@@ -50,7 +50,7 @@ function useDismiss(ref: RefObject<HTMLElement | null>, open: boolean, onClose: 
 /** POST to the inbox-send edge function. Throws a readable Error on any failure. */
 async function callInbox(body: Record<string, unknown>): Promise<void> {
   const { data } = await supabase.auth.getSession();
-  const bearer = data.session?.access_token ?? (import.meta.env.VITE_SUPABASE_ANON_KEY as string);
+  const bearer = data.session?.access_token ?? "";
   let res: Response;
   try {
     res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/inbox-send`, {
@@ -430,7 +430,7 @@ export function Conversations() {
       });
       if (!name) return;
       if (!agents.includes(name)) {
-        const { error } = await supabase.from("agent").upsert({ name }, { onConflict: "name" });
+        const { error } = await supabase.from("agent").upsert({ name }, { onConflict: "workspace_id,name" });
         if (error) return toast.error(error);
         setAgents((a) => [...a, name].sort());
       }

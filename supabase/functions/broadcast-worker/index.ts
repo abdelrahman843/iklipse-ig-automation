@@ -5,7 +5,7 @@
 // the same: recipients are counted at send time, not when it was scheduled), and either queues
 // its message blocks or starts its automation for every contact. Only contacts whose 24-hour
 // window is open can receive (Instagram will not deliver outside it), and contacts who opted out
-// get nothing.
+// get nothing. Everything is read inside the broadcast's own workspace.
 
 import { db, json } from "../_shared/db.ts";
 import { WINDOW_MS } from "../_shared/types.ts";
@@ -32,7 +32,7 @@ async function audienceOf(b: Row): Promise<Row[]> {
   if (!conditions.length && b.segment_tag) conditions = [{ field: "tag", op: "is", value: b.segment_tag }];
   // The same matching the Contacts page uses, narrowed to who Instagram can still deliver to.
   const { data, error } = await sql
-    .rpc("match_contacts", { p_conditions: conditions, p_search: "" })
+    .rpc("match_contacts", { p_conditions: conditions, p_search: "", p_workspace: b.workspace_id })
     .select("id, last_interaction_at")
     .gte("last_interaction_at", windowStart)
     .is("opted_out_at", null)
@@ -52,6 +52,7 @@ async function queueBlocks(b: Row, contacts: Row[]): Promise<number> {
     for (const payload of parts) {
       const { error } = await sql.from("send_queue").insert(
         chunk.map((c) => ({
+          workspace_id: b.workspace_id,
           contact_id: c.id,
           flow_run_id: null,
           send_type: "dm",
@@ -75,7 +76,11 @@ async function queueBlocks(b: Row, contacts: Row[]): Promise<number> {
 
 /** Start the broadcast's automation for every contact not already inside another run. */
 async function startFlow(b: Row, contacts: Row[]): Promise<number> {
-  const { data: flow } = await sql.from("flow").select("id, graph").eq("id", b.flow_id).is("deleted_at", null).maybeSingle();
+  const { data: flow } = await sql.from("flow").select("id, graph")
+    .eq("id", b.flow_id)
+    .eq("workspace_id", b.workspace_id)
+    .is("deleted_at", null)
+    .maybeSingle();
   if (!flow) throw new Error("The automation this broadcast sends was deleted or is in Trash");
   let started = 0;
   for (const c of contacts) {

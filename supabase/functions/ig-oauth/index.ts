@@ -10,15 +10,19 @@
 //
 // The callback only accepts a `state` this function issued in the last 15 minutes, once. Without
 // it, anyone who authorized the app with their own Instagram account could land it here as the
-// "connected" account and have every DM go out as them (login CSRF).
+// "connected" account and have every DM go out as them (login CSRF). The state also carries the
+// workspace that started the flow: the account is connected to that workspace only.
+//
+// One Instagram account belongs to one workspace. Connecting an account that another workspace
+// still has connected is refused; connecting a different account replaces this workspace's old one.
 //
 // Deployed with verify_jwt = false: the GET is a top-level browser redirect from Instagram and
 // carries no Supabase JWT. The POST checks the JWT itself.
 
 import { db, json } from "../_shared/db.ts";
 import { APP_URL, GRAPH_BASE, IG_APP_ID, IG_APP_SECRET, IG_REDIRECT_URI } from "../_shared/env.ts";
-import { credentials } from "../_shared/account.ts";
-import { requireUser } from "../_shared/auth.ts";
+import { credentialsFor } from "../_shared/account.ts";
+import { type Member, requireMember } from "../_shared/auth.ts";
 import { withCors } from "../_shared/cors.ts";
 
 const STATE_TTL_MS = 15 * 60 * 1000;
@@ -86,15 +90,41 @@ async function profile(token: string): Promise<{ userId: string; username?: stri
   return { userId: String(body.user_id), username: body.username };
 }
 
-async function store(token: string, expiresIn: number, userId: string, username?: string) {
+class ConnectError extends Error {}
+
+async function store(ws: string, token: string, expiresIn: number, userId: string, username?: string) {
   const sql = db();
   const expiresAt = expiresIn ? new Date(Date.now() + expiresIn * 1000).toISOString() : null;
   const now = new Date().toISOString();
+
+  const { data: existing } = await sql
+    .from("ig_account")
+    .select("id, workspace_id, status")
+    .eq("ig_user_id", userId)
+    .maybeSingle();
+  if (existing && existing.workspace_id !== ws && existing.status !== "disconnected") {
+    throw new ConnectError(
+      `@${username ?? userId} is already connected to another workspace. Disconnect it there first.`,
+    );
+  }
+
+  // A workspace runs one account: a different one connected here before is replaced.
+  const { data: others } = await sql
+    .from("ig_account")
+    .select("id")
+    .eq("workspace_id", ws)
+    .neq("ig_user_id", userId)
+    .neq("status", "disconnected");
+  for (const o of others ?? []) {
+    await sql.from("ig_token").delete().eq("ig_account_id", o.id);
+    await sql.from("ig_account").update({ status: "disconnected", token_expires_at: null }).eq("id", o.id);
+  }
 
   const { data: acct, error } = await sql
     .from("ig_account")
     .upsert(
       {
+        workspace_id: ws,
         ig_user_id: userId,
         username: username ?? null,
         status: "connected",
@@ -130,43 +160,49 @@ async function subscribe(token: string): Promise<void> {
   }
 }
 
-/** Re-run the webhook subscription for the connected account with its stored token. */
-async function resubscribe(): Promise<Response> {
-  const { token } = await credentials();
+/** Re-run the webhook subscription for the workspace's account with its stored token. */
+async function resubscribe(member: Member): Promise<Response> {
+  const { token } = await credentialsFor(member.workspaceId);
   await subscribe(token);
   return json({ subscribed: true }, 200, cors);
 }
 
 /** A fresh random state, stored server-side so the callback can prove the flow started here. */
-async function start(): Promise<Response> {
+async function start(member: Member): Promise<Response> {
   const bytes = crypto.getRandomValues(new Uint8Array(24));
   const state = Array.from(bytes, (x) => x.toString(16).padStart(2, "0")).join("");
   const sql = db();
   // Old, never-used states are just clutter; sweep them while we are here.
   await sql.from("oauth_state").delete().lt("created_at", new Date(Date.now() - STATE_TTL_MS).toISOString());
-  const { error } = await sql.from("oauth_state").insert({ state });
+  const { error } = await sql
+    .from("oauth_state")
+    .insert({ state, workspace_id: member.workspaceId, user_id: member.userId });
   if (error) return json({ error: `Could not start the connection: ${error.message}` }, 500, cors);
   return json({ state }, 200, cors);
 }
 
-/** Consume a state: true only if it exists, is fresh, and has not been used before. */
-async function consumeState(state: string | null): Promise<boolean> {
-  if (!state) return false;
+/** Consume a state: the workspace that issued it, only if it is fresh and unused; else null. */
+async function consumeState(state: string | null): Promise<string | null> {
+  if (!state) return null;
   const { data } = await db()
     .from("oauth_state")
     .delete()
     .eq("state", state)
     .gte("created_at", new Date(Date.now() - STATE_TTL_MS).toISOString())
-    .select("state");
-  return Boolean(data?.length);
+    .select("workspace_id");
+  return data?.[0]?.workspace_id ?? null;
 }
 
-async function disconnect(): Promise<Response> {
+async function disconnect(member: Member): Promise<Response> {
   const sql = db();
-  // Clear every stored token and mark accounts disconnected. Meta revocation is user-side.
-  const { data: accts } = await sql.from("ig_account").select("id");
+  // Clear this workspace's stored token and mark its account disconnected. Meta revocation is
+  // user-side.
+  const { data: accts } = await sql.from("ig_account").select("id").eq("workspace_id", member.workspaceId);
   for (const a of accts ?? []) await sql.from("ig_token").delete().eq("ig_account_id", a.id);
-  await sql.from("ig_account").update({ status: "disconnected", token_expires_at: null }).neq("id", "00000000-0000-0000-0000-000000000000");
+  await sql
+    .from("ig_account")
+    .update({ status: "disconnected", token_expires_at: null })
+    .eq("workspace_id", member.workspaceId);
 
   return json({ disconnected: true }, 200, cors);
 }
@@ -178,12 +214,13 @@ async function handle(req: Request): Promise<Response> {
 
   if (req.method === "POST") {
     try {
-      const denied = await requireUser(req, db(), cors);
-      if (denied) return denied;
+      const member = await requireMember(req, db(), cors);
+      if (member instanceof Response) return member;
       const body = await req.json().catch(() => ({}));
-      if (body?.action === "start") return await start();
-      if (body?.action === "resubscribe") return await resubscribe();
-      return await disconnect();
+      if (body?.action === "start") return await start(member);
+      if (body?.action === "resubscribe") return await resubscribe(member);
+      if (body?.action === "disconnect") return await disconnect(member);
+      return json({ error: "Unknown action" }, 400, cors);
     } catch (err) {
       return json({ error: String(err) }, 500, cors);
     }
@@ -195,17 +232,19 @@ async function handle(req: Request): Promise<Response> {
 
   const code = url.searchParams.get("code");
   if (!code) return back({ ig: "error", reason: "No code returned" });
-  if (!(await consumeState(url.searchParams.get("state")))) {
+  const ws = await consumeState(url.searchParams.get("state"));
+  if (!ws) {
     return back({ ig: "error", reason: "This connect link expired or was not started from the panel. Try again." });
   }
 
   try {
     const { token, expiresIn } = await exchange(code);
     const { userId, username } = await profile(token);
-    await store(token, expiresIn, userId, username);
+    await store(ws, token, expiresIn, userId, username);
     await subscribe(token);
     return back({ ig: "connected", username: username ?? "" });
   } catch (err) {
+    if (err instanceof ConnectError) return back({ ig: "error", reason: err.message });
     console.error("ig-oauth failed:", err);
     return back({ ig: "error", reason: String(err).slice(0, 200) });
   }

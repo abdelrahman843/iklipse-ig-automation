@@ -13,12 +13,6 @@ export const META_APP_SECRET = () => env("META_APP_SECRET");
 /** The string you invent and paste into Meta's webhook setup form. */
 export const VERIFY_TOKEN = () => env("META_VERIFY_TOKEN");
 
-/** Long-lived Instagram access token. Sends DMs as the business. Never expose it. */
-export const IG_ACCESS_TOKEN = () => env("IG_ACCESS_TOKEN");
-
-/** The Instagram professional account id that owns the conversations. */
-export const IG_USER_ID = () => env("IG_USER_ID");
-
 export const GRAPH_BASE = () => env("GRAPH_BASE", "https://graph.instagram.com/v26.0");
 
 // ---- Instagram OAuth (connect flow) ----------------------------------------------------
@@ -34,3 +28,9 @@ export const IG_REDIRECT_URI = () => env("IG_REDIRECT_URI");
 
 /** Where to send the browser back to after connecting. */
 export const APP_URL = () => env("APP_URL", "http://localhost:5173");
+
+/** Shared secret the admin-accounts function requires (header x-admin-key). Only n8n holds it. */
+export const ADMIN_API_KEY = () => env("ADMIN_API_KEY");
+
+/** Logins are usernames; Supabase Auth stores each as <username>@ this domain. ".invalid" is a reserved TLD: no one can ever receive mail there, so a password-reset email can never reach anyone. */
+export const LOGIN_DOMAIN = () => env("LOGIN_DOMAIN", "login.iklipse.invalid");

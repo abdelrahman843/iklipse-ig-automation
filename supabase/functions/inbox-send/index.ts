@@ -11,7 +11,8 @@
 import { db, json } from "../_shared/db.ts";
 import { kick } from "../_shared/invoke.ts";
 import { sendHumanMessage } from "../_shared/meta.ts";
-import { requireUser } from "../_shared/auth.ts";
+import { requireMember } from "../_shared/auth.ts";
+import { credentialsFor, NoAccountError } from "../_shared/account.ts";
 import { withCors } from "../_shared/cors.ts";
 import { WINDOW_MS } from "../_shared/types.ts";
 import type { FlowGraph, MessageContent } from "../_shared/types.ts";
@@ -39,8 +40,9 @@ async function handle(req: Request): Promise<Response> {
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405, cors);
 
   const sql = db();
-  const denied = await requireUser(req, sql, cors);
-  if (denied) return denied;
+  const member = await requireMember(req, sql, cors);
+  if (member instanceof Response) return member;
+  const ws = member.workspaceId;
 
   let payload: { contactId?: string; text?: string; content?: MessageContent; flowId?: string };
   try {
@@ -54,6 +56,7 @@ async function handle(req: Request): Promise<Response> {
     .from("contact")
     .select("id, igsid, last_interaction_at")
     .eq("id", payload.contactId)
+    .eq("workspace_id", ws)
     .maybeSingle();
   if (!contact) return json({ error: "Contact not found" }, 404, cors);
 
@@ -63,6 +66,7 @@ async function handle(req: Request): Promise<Response> {
       .from("flow")
       .select("id, graph")
       .eq("id", payload.flowId)
+      .eq("workspace_id", ws)
       .is("deleted_at", null)
       .maybeSingle();
     const graph = (flow?.graph ?? {}) as FlowGraph;
@@ -70,6 +74,7 @@ async function handle(req: Request): Promise<Response> {
     // Queued as an already-due delay: process-events picks it up on its next pass (kicked now),
     // so the run goes through the one engine path instead of a second copy of it here.
     const { error: runErr } = await sql.from("flow_run").insert({
+      workspace_id: ws,
       flow_id: flow.id,
       contact_id: contact.id,
       status: "waiting_delay",
@@ -96,8 +101,10 @@ async function handle(req: Request): Promise<Response> {
   }
 
   try {
-    const result = await sendHumanMessage(contact.igsid, content, state === "human_only");
+    const creds = await credentialsFor(ws);
+    const result = await sendHumanMessage(creds, contact.igsid, content, state === "human_only");
     await sql.from("message").insert({
+      workspace_id: ws,
       contact_id: contact.id,
       direction: "out",
       sent_by: "human",
@@ -105,7 +112,7 @@ async function handle(req: Request): Promise<Response> {
       meta_message_id: (result.message_id as string) ?? null,
     });
     // Settings › Live Chat decides how long; 0 means a human reply doesn't pause anything.
-    const { data: settings } = await sql.from("app_settings").select("human_pause_minutes").eq("id", 1).maybeSingle();
+    const { data: settings } = await sql.from("app_settings").select("human_pause_minutes").eq("workspace_id", ws).maybeSingle();
     const minutes = Number(settings?.human_pause_minutes ?? DEFAULT_PAUSE_MINUTES);
     await sql
       .from("contact")
@@ -113,9 +120,11 @@ async function handle(req: Request): Promise<Response> {
         ...(minutes > 0 ? { pause_until: new Date(Date.now() + minutes * 60_000).toISOString() } : {}),
         unread: false,
       })
-      .eq("id", contact.id);
+      .eq("id", contact.id)
+      .eq("workspace_id", ws);
     return json({ sent: true, state, tagged: state === "human_only" }, 200, cors);
   } catch (err) {
+    if (err instanceof NoAccountError) return json({ error: err.message }, 409, cors);
     console.error("inbox-send failed:", err);
     return json({ error: String(err) }, 502, cors);
   }

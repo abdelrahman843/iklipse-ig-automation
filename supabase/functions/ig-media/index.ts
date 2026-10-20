@@ -1,11 +1,11 @@
-// Lists the connected account's recent posts, so the comment trigger can pick a post instead of
-// pasting a numeric media id. Reads through the server-side token (credentials()); the token
+// Lists the workspace's connected account's recent posts, so the comment trigger can pick a post instead of
+// pasting a numeric media id. Reads through the workspace's server-side token; the token
 // never touches the browser. GET only.
 
 import { db, json } from "../_shared/db.ts";
-import { requireUser } from "../_shared/auth.ts";
+import { requireMember } from "../_shared/auth.ts";
 import { withCors } from "../_shared/cors.ts";
-import { credentials } from "../_shared/account.ts";
+import { credentialsFor } from "../_shared/account.ts";
 import { GRAPH_BASE } from "../_shared/env.ts";
 
 const cors = {
@@ -18,12 +18,12 @@ Deno.serve(async (req) => withCors(req, await handle(req)));
 async function handle(req: Request): Promise<Response> {
   if (req.method === "OPTIONS") return new Response(null, { headers: cors });
   if (req.method !== "GET") return json({ error: "Method not allowed" }, 405, cors);
-  const denied = await requireUser(req, db(), cors);
-  if (denied) return denied;
+  const member = await requireMember(req, db(), cors);
+  if (member instanceof Response) return member;
 
   let creds;
   try {
-    creds = await credentials();
+    creds = await credentialsFor(member.workspaceId);
   } catch {
     return json({ error: "No Instagram account connected yet." }, 400, cors);
   }

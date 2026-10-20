@@ -6,7 +6,8 @@
 //   - otherwise it is sent (only if the 24-hour messaging window is open — Instagram forbids DMs
 //     outside it), as its own blocks or by starting its automation;
 // then the subscription moves to the next message, or is marked done when the messages run out.
-// A contact who opted out is taken off the sequence.
+// A contact who opted out is taken off the sequence. Everything is read inside the subscription's
+// own workspace.
 
 import { db, json } from "../_shared/db.ts";
 import { WINDOW_MS } from "../_shared/types.ts";
@@ -134,6 +135,7 @@ Deno.serve(async (req) => {
           .from("flow")
           .select("id, graph")
           .eq("id", step.flow_id)
+          .eq("workspace_id", sub.workspace_id)
           .is("deleted_at", null)
           .maybeSingle();
         const started = flow ? await queueFlowRun(sql, flow, contact.id, { sequence_step_id: step.id }) : false;
@@ -153,6 +155,7 @@ Deno.serve(async (req) => {
       const expires = new Date(new Date(contact.last_interaction_at).getTime() + WINDOW_MS).toISOString();
       for (const payload of bubbles(step.content as StoredContent)) {
         const { error: qErr } = await sql.from("send_queue").insert({
+          workspace_id: contact.workspace_id,
           contact_id: contact.id,
           flow_run_id: null,
           send_type: "dm",

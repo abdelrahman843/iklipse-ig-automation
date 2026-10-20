@@ -3,9 +3,16 @@
 // Called straight from ig-webhook the moment an event lands, and every minute by pg_cron as the
 // safety net for delays, reply timeouts and anything the direct call missed. Both paths can run
 // at once, so every row is claimed before it is worked on.
+//
+// Workspaces: a webhook entry is for one Instagram account (entry.id), and that account belongs to
+// one workspace. Everything an event touches (contact, flows, fields, settings, the account that
+// answers) is looked up inside that workspace only. A run carries its workspace on its contact.
+// This function uses the service role, which RLS does not filter, so every query here is scoped
+// by hand.
 
 import { db, json } from "../_shared/db.ts";
 import { fetchFollowState, fetchProfile, listMedia, MetaError } from "../_shared/meta.ts";
+import { credentialsFor } from "../_shared/account.ts";
 import { kick } from "../_shared/invoke.ts";
 import { requireService } from "../_shared/auth.ts";
 import { LIVE_REPLY_TTL_MS, PRIVATE_REPLY_TTL_MS, WINDOW_MS } from "../_shared/types.ts";
@@ -47,15 +54,15 @@ let queued = 0; // sends enqueued during this invocation, so we know whether to 
 
 // ---------------------------------------------------------------- contacts
 
-async function upsertContact(igsid: string, username?: string, touchWindow = false): Promise<Row> {
-  const patch: Row = { igsid };
+async function upsertContact(ws: string, igsid: string, username?: string, touchWindow = false): Promise<Row> {
+  const patch: Row = { workspace_id: ws, igsid };
   if (username) patch.username = username;
   // A comment does not open the messaging window. Only a reply or a button tap does.
   if (touchWindow) patch.last_interaction_at = new Date().toISOString();
 
   const { data, error } = await sql
     .from("contact")
-    .upsert(patch, { onConflict: "igsid" })
+    .upsert(patch, { onConflict: "workspace_id,igsid" })
     .select()
     .single();
   if (error) throw new Error(`contact upsert failed: ${error.message}`);
@@ -82,7 +89,7 @@ async function refreshProfile(contact: Row): Promise<void> {
   const now = new Date().toISOString();
   const patch: Row = { profile_checked_at: now };
   try {
-    const p = await fetchProfile(contact.igsid);
+    const p = await fetchProfile(await credentialsFor(contact.workspace_id), contact.igsid);
     if (p.name) patch.name = p.name;
     if (p.username) patch.username = p.username;
     if (p.profile_pic) patch.profile_pic = p.profile_pic;
@@ -99,7 +106,7 @@ async function refreshProfile(contact: Row): Promise<void> {
 async function backfillProfiles(): Promise<void> {
   const { data } = await sql
     .from("contact")
-    .select("id, igsid, profile_checked_at")
+    .select("id, workspace_id, igsid, profile_checked_at")
     .is("profile_checked_at", null)
     .gte("last_interaction_at", new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString())
     .limit(3);
@@ -134,14 +141,14 @@ async function storeRef(contact: Row, ref: string): Promise<void> {
 const FLOW_PAYLOAD = "FLOW:";
 const WAITING = ["waiting_input", "waiting_delay"];
 
-let optSettings: Row | null | undefined; // read once per invocation
+let optSettings = new Map<string, Row | null>(); // per workspace, read once per invocation
 
-async function optConfig(): Promise<Row | null> {
-  if (optSettings === undefined) {
-    const { data } = await sql.from("messenger_profile").select("opt_in, opt_out").eq("id", 1).maybeSingle();
-    optSettings = data ?? null;
+async function optConfig(ws: string): Promise<Row | null> {
+  if (!optSettings.has(ws)) {
+    const { data } = await sql.from("messenger_profile").select("opt_in, opt_out").eq("workspace_id", ws).maybeSingle();
+    optSettings.set(ws, data ?? null);
   }
-  return optSettings;
+  return optSettings.get(ws) ?? null;
 }
 
 /** A starter or menu tap: drop what the contact was waiting in and run that automation. */
@@ -151,6 +158,7 @@ async function handleFlowTap(payload: string, contact: Row): Promise<boolean> {
     .from("flow")
     .select()
     .eq("id", payload.slice(FLOW_PAYLOAD.length))
+    .eq("workspace_id", contact.workspace_id)
     .is("deleted_at", null)
     .maybeSingle();
   if (!flow) return true; // its automation was deleted or trashed: swallow the tap, don't keyword-match "FLOW:…"
@@ -168,7 +176,7 @@ async function handleFlowTap(payload: string, contact: Row): Promise<boolean> {
 async function handleOptKeyword(text: string, contact: Row): Promise<boolean> {
   const word = text.trim().toLowerCase();
   if (!word || word.length > 40) return false;
-  const cfg = await optConfig();
+  const cfg = await optConfig(contact.workspace_id);
   const said = (o: Row | undefined) =>
     Boolean(o?.enabled) && (o?.keywords ?? []).some((k: string) => k.trim().toLowerCase() === word);
   const out = said(cfg?.opt_out);
@@ -190,6 +198,7 @@ async function handleOptKeyword(text: string, contact: Row): Promise<boolean> {
   const reply = String((out ? cfg?.opt_out : cfg?.opt_in)?.reply ?? "").trim();
   if (reply) {
     const { error } = await sql.from("send_queue").insert({
+      workspace_id: contact.workspace_id,
       contact_id: contact.id,
       flow_run_id: null,
       send_type: "dm",
@@ -251,6 +260,7 @@ async function enqueue(
   }
 
   const { error } = await sql.from("send_queue").insert({
+    workspace_id: contact.workspace_id,
     contact_id: contact.id,
     flow_run_id: run.id,
     send_type: kind,
@@ -305,7 +315,7 @@ async function saveCustomField(
     fields[`${key}_opt_in_at`] = new Date().toISOString();
   }
   await sql.from("contact").update({ custom_fields: fields }).eq("id", contact.id);
-  await sql.from("custom_field").upsert({ key, type }, { onConflict: "key" });
+  await sql.from("custom_field").upsert({ workspace_id: contact.workspace_id, key, type }, { onConflict: "workspace_id,key" });
 }
 
 /** Choice options plus an optional Skip, as Instagram quick replies. */
@@ -318,18 +328,20 @@ function buildQuicks(node: FlowNode): { title: string; payload: string }[] {
   return q;
 }
 
-let botFields: Record<string, string> = {}; // read once per invocation; {{bot.key}}
+let botFields = new Map<string, Record<string, string>>(); // {{bot.key}}, per workspace, once per invocation
 
-async function loadBotFields(): Promise<void> {
-  const { data } = await sql.from("bot_field").select("key, value");
-  botFields = Object.fromEntries((data ?? []).map((f: Row) => [f.key, f.value]));
+async function loadBotFields(ws: string): Promise<void> {
+  if (botFields.has(ws)) return;
+  const { data, error } = await sql.from("bot_field").select("key, value").eq("workspace_id", ws);
+  if (error) console.warn("bot fields not loaded:", error.message);
+  botFields.set(ws, Object.fromEntries((data ?? []).map((f: Row) => [f.key, f.value])));
 }
 
 function readPath(path: string, state: Row, contact: Row): unknown {
   const [scope, ...rest] = path.split(".");
   const key = rest.join(".");
   if (scope === "state") return state?.[key];
-  if (scope === "bot") return botFields[key];
+  if (scope === "bot") return botFields.get(contact?.workspace_id)?.[key];
   // {{contact.username}} reads the contact; {{contact.city}} falls through to a custom field.
   if (scope === "contact") return contact?.[key] ?? contact?.custom_fields?.[key];
   return undefined;
@@ -410,7 +422,9 @@ async function runActions(node: FlowNode, state: Row, contact: Row, run: Row): P
           const fields = { ...(contact.custom_fields ?? {}), [a.field]: value };
           await sql.from("contact").update({ custom_fields: fields }).eq("id", contact.id);
           contact.custom_fields = fields; // the next action in this step builds on this one
-          await sql.from("custom_field").upsert({ key: a.field, type: "text" }, { onConflict: "key" });
+          await sql
+            .from("custom_field")
+            .upsert({ workspace_id: contact.workspace_id, key: a.field, type: "text" }, { onConflict: "workspace_id,key" });
           break;
         }
         case "clear_field": {
@@ -445,13 +459,17 @@ async function runActions(node: FlowNode, state: Row, contact: Row, run: Row): P
         case "set_bot_field": {
           if (!a.field) break;
           const value = interpolate(a.value ?? "", state, contact);
-          await sql.from("bot_field").upsert({ key: a.field, value, updated_at: new Date().toISOString() }, { onConflict: "key" });
-          botFields[a.field] = value;
+          await sql.from("bot_field").upsert(
+            { workspace_id: contact.workspace_id, key: a.field, value, updated_at: new Date().toISOString() },
+            { onConflict: "workspace_id,key" },
+          );
+          botFields.get(contact.workspace_id)![a.field] = value;
           break;
         }
         case "log_conversion": {
           const amount = Number(interpolate(a.value ?? "", state, contact));
           await sql.from("conversion_event").insert({
+            workspace_id: contact.workspace_id,
             contact_id: contact.id,
             flow_id: run.flow_id ?? null,
             name: (a.event ?? "").trim() || "conversion",
@@ -478,11 +496,14 @@ async function runActions(node: FlowNode, state: Row, contact: Row, run: Row): P
             .from("sequence_step")
             .select("delay_seconds")
             .eq("sequence_id", a.sequenceId)
+            .eq("workspace_id", contact.workspace_id)
             .order("sort")
             .limit(1)
             .maybeSingle();
-          await sql.from("sequence_subscription").upsert(
+          // The sequence must be this workspace's: the (workspace, sequence) key refuses another's.
+          const { error: subErr } = await sql.from("sequence_subscription").upsert(
             {
+              workspace_id: contact.workspace_id,
               sequence_id: a.sequenceId,
               contact_id: contact.id,
               step: 0,
@@ -491,6 +512,7 @@ async function runActions(node: FlowNode, state: Row, contact: Row, run: Row): P
             },
             { onConflict: "sequence_id,contact_id" },
           );
+          if (subErr) throw new Error(subErr.message);
           break;
         }
         case "unsubscribe_sequence": {
@@ -653,6 +675,13 @@ async function executeRun(runId: string): Promise<void> {
   const { data: flow } = await sql.from("flow").select().eq("id", run.flow_id).single();
   let { data: contact } = await sql.from("contact").select().eq("id", run.contact_id).single();
   if (!flow || !contact) return;
+  // The foreign keys already keep a run, its flow and its contact in one workspace; refuse loudly
+  // if that ever stops holding rather than send one workspace's content to another's contact.
+  if (flow.workspace_id !== contact.workspace_id || run.workspace_id !== contact.workspace_id) {
+    await saveRun(runId, { status: "failed", error: "This run mixes workspaces and was stopped" });
+    return;
+  }
+  await loadBotFields(contact.workspace_id);
 
   const graph = (flow.graph ?? {}) as FlowGraph;
   const state: Row = { ...(run.state ?? {}) };
@@ -799,12 +828,19 @@ async function executeRun(runId: string): Promise<void> {
           if (hops > MAX_FLOW_HOPS) console.warn(`go_to_flow stopped after ${MAX_FLOW_HOPS} hops (run ${runId})`);
           return;
         }
-        const { data: target } = await sql.from("flow").select().eq("id", node.targetFlowId).maybeSingle();
+        const { data: target } = await sql
+          .from("flow")
+          .select()
+          .eq("id", node.targetFlowId)
+          .eq("workspace_id", contact.workspace_id)
+          .is("deleted_at", null)
+          .maybeSingle();
         const targetGraph = (target?.graph ?? {}) as FlowGraph;
         if (!target || target.status !== "live" || !targetGraph.start) return;
         const { data: next, error: nextErr } = await sql
           .from("flow_run")
           .insert({
+            workspace_id: contact.workspace_id,
             flow_id: target.id,
             contact_id: contact.id,
             status: "running",
@@ -817,7 +853,7 @@ async function executeRun(runId: string): Promise<void> {
           console.error("go_to_flow insert failed:", nextErr.message);
           return;
         }
-        await executeRun(next.id);
+        await executeSafely(next.id);
         return;
       }
 
@@ -887,7 +923,7 @@ async function executeRun(runId: string): Promise<void> {
         // "not confirmed" and take the false branch rather than killing the run.
         let follows = false;
         try {
-          const result = await fetchFollowState(contact.igsid);
+          const result = await fetchFollowState(await credentialsFor(contact.workspace_id), contact.igsid);
           follows = result.follows;
           const { data: updated } = await sql
             .from("contact")
@@ -962,6 +998,7 @@ async function startRun(flow: Row, contact: Row, seed: Row): Promise<string | nu
   const { data, error } = await sql
     .from("flow_run")
     .insert({
+      workspace_id: contact.workspace_id,
       flow_id: flow.id,
       contact_id: contact.id,
       current_node_id: graph.start,
@@ -1092,7 +1129,7 @@ async function fire(match: { flow: Row; hit: TriggerHit } | null, contact: Row):
   if (runId) await queuePublicReply(match.flow, contact, runId, seed.comment_id);
 }
 
-let publicPaused: boolean | undefined; // read once per invocation
+let publicPaused = new Map<string, boolean>(); // per workspace, read once per invocation
 
 /**
  * "Reply to their comment too": a public reply under the comment, alongside the DM. Rotates
@@ -1102,13 +1139,15 @@ let publicPaused: boolean | undefined; // read once per invocation
 async function queuePublicReply(flow: Row, contact: Row, runId: string, commentId?: string): Promise<void> {
   const lines = (flow.trigger_config?.commentReply ?? []).filter((s: string) => s.trim());
   if (!commentId || !lines.length) return;
-  if (publicPaused === undefined) {
-    const { data } = await sql.from("send_guard").select("public_paused_until").eq("id", 1).maybeSingle();
-    publicPaused = Boolean(data?.public_paused_until && new Date(data.public_paused_until).getTime() > Date.now());
+  const ws = contact.workspace_id;
+  if (!publicPaused.has(ws)) {
+    const { data } = await sql.from("send_guard").select("public_paused_until").eq("workspace_id", ws).maybeSingle();
+    publicPaused.set(ws, Boolean(data?.public_paused_until && new Date(data.public_paused_until).getTime() > Date.now()));
   }
-  if (publicPaused) return;
+  if (publicPaused.get(ws)) return;
 
   const { error } = await sql.from("send_queue").insert({
+    workspace_id: ws,
     contact_id: contact.id,
     flow_run_id: runId,
     send_type: "public_reply",
@@ -1125,8 +1164,9 @@ async function queuePublicReply(flow: Row, contact: Row, runId: string, commentI
  * Meta re-delivers a webhook it thinks we missed. Record each message and comment the first
  * time it arrives; false means it was handled already.
  */
-async function firstSighting(key: string | null): Promise<boolean> {
-  if (!key) return true;
+async function firstSighting(ws: string, item: string | null): Promise<boolean> {
+  if (!item) return true;
+  const key = `${ws}:${item}`;
   const { data, error } = await sql
     .from("seen_item")
     .upsert({ key, event_id: currentEvent }, { onConflict: "key", ignoreDuplicates: true })
@@ -1143,20 +1183,21 @@ async function firstSighting(key: string | null): Promise<boolean> {
 }
 
 /** An inbound message: record it, resume a waiting run, or match a trigger. */
-async function handleMessagingItem(item: RawItem, liveFlows: Row[]): Promise<void> {
+async function handleMessagingItem(ws: string, item: RawItem, liveFlows: Row[]): Promise<void> {
   const m = item.messaging!;
   if (!isInbound(m)) return; // our echo, a receipt, or a reaction
   const mid = m.message?.mid ?? m.postback?.mid;
-  if (!(await firstSighting(mid ? `m:${mid}` : null))) return;
+  if (!(await firstSighting(ws, mid ? `m:${mid}` : null))) return;
 
   const igsid: string = m.sender.id;
   const text: string =
     m.postback?.payload ?? m.message?.quick_reply?.payload ?? m.message?.text ?? "";
 
   // A reply or a button tap opens the 24-hour window.
-  const contact = await upsertContact(igsid, undefined, true);
+  const contact = await upsertContact(ws, igsid, undefined, true);
 
   await sql.from("message").insert({
+    workspace_id: ws,
     contact_id: contact.id,
     direction: "in",
     payload: m.message ?? m.postback ?? {},
@@ -1189,7 +1230,7 @@ async function handleMessagingItem(item: RawItem, liveFlows: Row[]): Promise<voi
   await fire(matchTrigger(item, liveFlows), contact);
 }
 
-let recentMedia: Promise<{ id: string; timestamp: string }[]> | null = null; // read once per invocation
+let recentMedia = new Map<string, Promise<{ id: string; timestamp: string }[]>>(); // per workspace, once per invocation
 
 /** Instagram writes "+0000"; make it an offset every Date parser accepts. */
 const igTime = (t: string) => new Date(t.replace(/([+-]\d\d)(\d\d)$/, "$1:$2")).getTime();
@@ -1200,16 +1241,23 @@ const igTime = (t: string) => new Date(t.replace(/([+-]\d\d)(\d\d)$/, "$1:$2")).
  * from then on it behaves like "specific post". Runs on comments only, and only reads the post
  * list when some automation is still waiting.
  */
-async function bindNextPosts(flows: Row[]): Promise<void> {
+async function bindNextPosts(ws: string, flows: Row[]): Promise<void> {
   const waiting = flows.filter(
     (f) => f.trigger_type === "comment" && f.trigger_config?.nextPostAfter && !f.trigger_config?.mediaId,
   );
   if (!waiting.length) return;
-  recentMedia ??= listMedia().catch((err) => {
-    console.warn("next post: could not list posts:", err instanceof Error ? err.message : err);
-    return [];
-  });
-  const media = await recentMedia;
+  if (!recentMedia.has(ws)) {
+    recentMedia.set(
+      ws,
+      credentialsFor(ws)
+        .then((creds) => listMedia(creds))
+        .catch((err) => {
+          console.warn("next post: could not list posts:", err instanceof Error ? err.message : err);
+          return [];
+        }),
+    );
+  }
+  const media = await recentMedia.get(ws)!;
 
   for (const flow of waiting) {
     const after = new Date(flow.trigger_config.nextPostAfter).getTime();
@@ -1225,7 +1273,7 @@ async function bindNextPosts(flows: Row[]): Promise<void> {
     if (pending?.nextPostAfter === flow.trigger_config.nextPostAfter && !pending.mediaId) {
       patch.draft = { ...flow.draft, trigger_config: { ...pending, mediaId: next.id } };
     }
-    const { error } = await sql.from("flow").update(patch).eq("id", flow.id);
+    const { error } = await sql.from("flow").update(patch).eq("id", flow.id).eq("workspace_id", ws);
     if (error) {
       console.error(`next post: binding flow ${flow.id} failed:`, error.message);
       continue;
@@ -1235,23 +1283,49 @@ async function bindNextPosts(flows: Row[]): Promise<void> {
 }
 
 /** A change (comment, live comment): match a trigger. A comment never opens the window. */
-async function handleChangeItem(item: RawItem, liveFlows: Row[]): Promise<void> {
+async function handleChangeItem(ws: string, item: RawItem, liveFlows: Row[]): Promise<void> {
   const value = item.change?.value ?? {};
   const igsid: string | undefined = value.from?.id;
   if (!igsid || igsid === item.selfIgId) return; // our own comment, or no author
-  if (!(await firstSighting(value.id ? `c:${item.change?.field}:${value.id}` : null))) return;
-  if (item.change?.field === "comments") await bindNextPosts(liveFlows);
+  if (!(await firstSighting(ws, value.id ? `c:${item.change?.field}:${value.id}` : null))) return;
+  if (item.change?.field === "comments") await bindNextPosts(ws, liveFlows);
 
-  const contact = await upsertContact(igsid, value.from?.username, false);
+  const contact = await upsertContact(ws, igsid, value.from?.username, false);
   if (await activeRun(contact.id)) return;
   await fire(matchTrigger(item, liveFlows), contact);
 }
 
-async function handleEntry(entry: Row, liveFlows: Row[]): Promise<void> {
-  for (const item of itemsFromEntry(entry, entry.id)) {
-    if (item.messaging) await handleMessagingItem(item, liveFlows);
-    else if (item.change) await handleChangeItem(item, liveFlows);
+let workspaceOf = new Map<string, string | null>(); // Instagram account id -> workspace, per invocation
+
+/** The workspace whose connected account this webhook entry is for, or null. */
+async function workspaceFor(igUserId: string): Promise<string | null> {
+  if (!workspaceOf.has(igUserId)) {
+    const { data } = await sql
+      .from("ig_account")
+      .select("workspace_id")
+      .eq("ig_user_id", igUserId)
+      .neq("status", "disconnected")
+      .maybeSingle();
+    workspaceOf.set(igUserId, data?.workspace_id ?? null);
   }
+  return workspaceOf.get(igUserId) ?? null;
+}
+
+/** Handle one entry inside its workspace. Returns that workspace, or null when no workspace has the account. */
+async function handleEntry(entry: Row, flowsByWs: Map<string, Row[]>): Promise<string | null> {
+  const ws = entry.id ? await workspaceFor(String(entry.id)) : null;
+  if (!ws) {
+    // An account that was disconnected (or never connected here) still gets a delivery now and
+    // then until Meta drops the subscription. Nobody owns it: answer nothing.
+    console.warn(`webhook entry for ${entry.id}: no workspace has this account connected; skipped`);
+    return null;
+  }
+  const liveFlows = flowsByWs.get(ws) ?? [];
+  for (const item of itemsFromEntry(entry, entry.id)) {
+    if (item.messaging) await handleMessagingItem(ws, item, liveFlows);
+    else if (item.change) await handleChangeItem(ws, item, liveFlows);
+  }
+  return ws;
 }
 
 async function processInbox(): Promise<number> {
@@ -1260,16 +1334,27 @@ async function processInbox(): Promise<number> {
   const { data: events, error } = await sql.rpc("claim_webhook_events", { batch_size: EVENT_BATCH });
   if (error) throw new Error(`claim_webhook_events failed: ${error.message}`);
 
-  // One read of the live flows serves every trigger match in this batch.
-  const { data: liveFlows } = await sql.from("flow").select().eq("status", "live");
-  const flows = liveFlows ?? [];
+  // One read of the live flows serves every trigger match in this batch, grouped by workspace.
+  const flowsByWs = new Map<string, Row[]>();
+  if (events?.length) {
+    const { data: liveFlows, error: flowsErr } = await sql.from("flow").select().eq("status", "live").is("deleted_at", null);
+    if (flowsErr) throw new Error(`live flows not loaded: ${flowsErr.message}`);
+    for (const f of liveFlows ?? []) {
+      if (!flowsByWs.has(f.workspace_id)) flowsByWs.set(f.workspace_id, []);
+      flowsByWs.get(f.workspace_id)!.push(f);
+    }
+  }
 
   let handled = 0;
   for (const event of events ?? []) {
     currentEvent = event.id;
     try {
-      for (const entry of event.raw?.entry ?? []) await handleEntry(entry, flows);
-      await sql.from("webhook_event").update({ done_at: new Date().toISOString(), error: null }).eq("id", event.id);
+      let ws: string | null = null;
+      for (const entry of event.raw?.entry ?? []) ws = (await handleEntry(entry, flowsByWs)) ?? ws;
+      await sql
+        .from("webhook_event")
+        .update({ done_at: new Date().toISOString(), error: null, ...(ws ? { workspace_id: ws } : {}) })
+        .eq("id", event.id);
       handled++;
     } catch (err) {
       // Left without done_at, so claim_webhook_events retries it a few minutes on.
@@ -1347,11 +1432,12 @@ Deno.serve(async (req) => {
   if (denied) return denied;
   queued = 0;
   privateReplyDue = new Map();
-  optSettings = undefined;
+  optSettings = new Map();
   profileFetches = new Map();
-  publicPaused = undefined;
-  recentMedia = null;
-  await loadBotFields().catch((err) => console.warn("bot fields not loaded:", err));
+  publicPaused = new Map();
+  recentMedia = new Map();
+  botFields = new Map();
+  workspaceOf = new Map();
   try {
     const events = await processInbox();
     const resumed = await resumeDue();

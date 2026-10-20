@@ -36,7 +36,7 @@ export const FLOW_PAYLOAD = "FLOW:";
 export const flowOf = (payload?: string) => (payload?.startsWith(FLOW_PAYLOAD) ? payload.slice(FLOW_PAYLOAD.length) : null);
 
 export async function loadProfile(): Promise<Profile> {
-  const { data, error } = await supabase.from("messenger_profile").select("*").eq("id", 1).maybeSingle();
+  const { data, error } = await supabase.from("messenger_profile").select("*").maybeSingle();
   if (error) throw error;
   return {
     ice_breakers: data?.ice_breakers ?? [],
@@ -51,7 +51,7 @@ export async function loadProfile(): Promise<Profile> {
 /** POST to the messenger-profile function; throws its error message. */
 export async function saveProfile(body: Record<string, unknown>): Promise<void> {
   const { data } = await supabase.auth.getSession();
-  const bearer = data.session?.access_token ?? (import.meta.env.VITE_SUPABASE_ANON_KEY as string);
+  const bearer = data.session?.access_token ?? "";
   let res: Response;
   try {
     res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/messenger-profile`, {

@@ -2,6 +2,7 @@
 // supabase/functions/_shared/content.ts: blocks are sent one bubble each, in order.
 
 import { supabase } from "./supabase";
+import { workspaceId } from "./workspace";
 import { matchContacts, type Condition } from "./conditions";
 import type { Contact, MessageContent } from "./types";
 
@@ -93,7 +94,8 @@ export async function uploadImage(file: File): Promise<string> {
   if (file.size > IMAGE_MAX_BYTES) {
     throw new Error(`That file is ${(file.size / 1024 / 1024).toFixed(1)} MB. Instagram's limit is 8 MB.`);
   }
-  const path = `${crypto.randomUUID()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, "-")}`;
+  // Each workspace uploads into its own folder; storage refuses a path outside it.
+  const path = `${await workspaceId()}/${crypto.randomUUID()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, "-")}`;
   const { error } = await supabase.storage.from("media").upload(path, file, { contentType: file.type, upsert: false });
   if (error) throw error;
   const { data } = supabase.storage.from("media").getPublicUrl(path);

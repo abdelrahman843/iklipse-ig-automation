@@ -189,6 +189,45 @@ a:hover { border-color: var(--ink); }
   align-items: stretch;
 }
 
+/* The workspace this login works in: a lettered badge, then its name and the login. */
+.rail-ws {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  padding: 6px 4px;
+  border-top: 1px solid var(--rule);
+  padding-top: 12px;
+}
+.rail-ws-badge {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  display: grid;
+  place-items: center;
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: 13px;
+  color: #fff;
+  background: var(--ink);
+}
+.rail-ws-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.rail-ws-name {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rail-mini .rail-ws-text { display: none; }
+.rail-mini .rail-ws { justify-content: center; padding-left: 0; padding-right: 0; }
+
 .rail-who {
   font-family: var(--mono);
   font-size: 10px;
@@ -738,6 +777,11 @@ a:hover { border-color: var(--ink); }
   gap: 8px;
   margin-top: 18px;
   flex-wrap: wrap;
+}
+
+.gate-hint {
+  font-size: 12px;
+  color: var(--ink-soft);
 }
 
 .gate-links .btn-quiet {
@@ -3325,6 +3369,8 @@ a:hover { border-color: var(--ink); }
 
   /* the drawer always shows labels, even when the desktop rail was collapsed */
   .rail-mini .mark-text, .rail-mini .rail-label, .rail-mini .rail-who { display: revert; }
+  .rail-mini .rail-ws-text { display: flex; }
+  .rail-mini .rail-ws { justify-content: flex-start; padding: 12px 4px 6px; }
   .rail-mini .mark { padding: 4px 8px; justify-content: flex-start; }
   .rail-mini .rail-top { flex-direction: row; }
   .rail-mini .rail-link { justify-content: flex-start; padding: 10px 12px; }

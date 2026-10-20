@@ -1,44 +1,65 @@
-// Resolves which Instagram account we act as, and its token.
+// Resolves which Instagram account a workspace acts as, and its token.
 //
-// Prefers an account connected through the OAuth flow (token in ig_token, server-only). Falls
-// back to the hand-pasted IG_ACCESS_TOKEN/IG_USER_ID env vars, so the pre-OAuth setup keeps
-// working until an account is connected. Cached per invocation — the token does not change
-// mid-run, and every send would otherwise hit the DB twice.
+// Every workspace connects its own account through the OAuth flow (token in ig_token,
+// server-only). There is deliberately no fallback: a workspace without a connected account
+// sends nothing, rather than sending as somebody else's account.
+//
+// Cached for a minute per workspace, so a batch of sends doesn't read the token for every
+// message, while a reconnect or a refreshed token is picked up quickly.
 
 import { db } from "./db.ts";
-import { IG_ACCESS_TOKEN, IG_USER_ID } from "./env.ts";
 
 export interface Credentials {
-  token: string;
+  workspaceId: string;
+  accountId: string;
   igUserId: string;
+  token: string;
 }
 
-let cache: Credentials | null = null;
+/** The workspace has no connected Instagram account (never connected, or disconnected). */
+export class NoAccountError extends Error {
+  constructor() {
+    super("No Instagram account is connected to this workspace. Connect one in Settings › Instagram.");
+    this.name = "NoAccountError";
+  }
+}
 
-export async function credentials(): Promise<Credentials> {
-  if (cache) return cache;
+const TTL_MS = 60_000;
+const cache = new Map<string, { at: number; creds: Promise<Credentials> }>();
 
+async function load(workspaceId: string): Promise<Credentials> {
   const sql = db();
   const { data: acct } = await sql
     .from("ig_account")
     .select("id, ig_user_id")
+    .eq("workspace_id", workspaceId)
     .eq("status", "connected")
-    .order("connected_at", { ascending: false })
-    .limit(1)
     .maybeSingle();
+  if (!acct) throw new NoAccountError();
 
-  if (acct) {
-    const { data: tok } = await sql
-      .from("ig_token")
-      .select("access_token")
-      .eq("ig_account_id", acct.id)
-      .maybeSingle();
-    if (tok?.access_token) {
-      cache = { token: tok.access_token, igUserId: acct.ig_user_id };
-      return cache;
-    }
-  }
+  const { data: tok } = await sql
+    .from("ig_token")
+    .select("access_token")
+    .eq("ig_account_id", acct.id)
+    .maybeSingle();
+  if (!tok?.access_token) throw new NoAccountError();
 
-  cache = { token: IG_ACCESS_TOKEN(), igUserId: IG_USER_ID() };
-  return cache;
+  return { workspaceId, accountId: acct.id, igUserId: acct.ig_user_id, token: tok.access_token };
+}
+
+export function credentialsFor(workspaceId: string): Promise<Credentials> {
+  const hit = cache.get(workspaceId);
+  if (hit && Date.now() - hit.at < TTL_MS) return hit.creds;
+  const creds = load(workspaceId);
+  cache.set(workspaceId, { at: Date.now(), creds });
+  // A failed read is not cached: the next call tries again.
+  creds.catch(() => {
+    if (cache.get(workspaceId)?.creds === creds) cache.delete(workspaceId);
+  });
+  return creds;
+}
+
+/** Forget a workspace's token, e.g. after Meta said it no longer works. */
+export function forgetCredentials(workspaceId: string): void {
+  cache.delete(workspaceId);
 }

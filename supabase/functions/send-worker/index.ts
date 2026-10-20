@@ -1,26 +1,30 @@
 // Drains send_queue without ever sending like a bot. Runs every minute from pg_cron and the moment
 // a row is queued.
 //
-// The limits live in the send_guard row (migration 27: Meta's published numbers, 5% under) and
-// claim_send_batch() applies them while claiming, so a row past its budget is never even picked up:
+// Every workspace sends as its own Instagram account, and Meta's limits are per account, so each
+// workspace has its own send_guard row (migration 29: limits, circuit breaker, viral switch).
+// claim_send_batch() applies those limits while claiming, so a row past its budget is never even
+// picked up:
 //   reactive       a reply to something the contact just did      95/s (Meta: 100/s)
 //   private_reply  the one DM a comment allows                     12/min, 712/h (Meta: 750/h)
 //   public_reply   a reply posted under a comment                  12/min, 712/h; off for a day when
 //                                                                  a post passes that (send_guard_tick)
 //   proactive      broadcasts and sequence messages                95/s (Meta: 100/s)
 //   per contact    25 messages an hour
-// One claim takes at most send_guard.limits.batch rows; whatever a run can't send before its
-// deadline goes back to pending for the next run.
-// Replies to someone waiting go out at once; everything else is spaced a few seconds apart.
-// A comment reply held by its short "human" pause is sent the moment the pause ends: one worker
-// at a time (the send_guard.waiting_until lease) stays up for WAIT_BUDGET_MS polling for it.
+// One claim takes at most 100 rows, shared between the workspaces that have something due;
+// whatever a run can't send before its deadline goes back to pending for the next run.
+// Replies to someone waiting go out at once; everything else is spaced a few seconds apart within
+// its workspace. A comment reply held by its short "human" pause is sent the moment the pause
+// ends: one worker at a time (the worker_lease row) stays up for WAIT_BUDGET_MS polling for it.
 //
 // Circuit breaker: Meta answering "rate limited" or "blocked", the access token dying, or Meta's
-// own usage headers passing 80% stops ALL sending for a while (send_guard.paused_until). Retrying
-// through a block is what gets accounts disabled.
+// own usage headers passing 80% stops that workspace's sending for a while
+// (send_guard.paused_until). Other workspaces keep sending. Retrying through a block is what gets
+// accounts disabled.
 
 import { db, json } from "../_shared/db.ts";
 import { MetaError, replyToComment, sendDirectMessage, sendPrivateReply, usagePressure } from "../_shared/meta.ts";
+import { type Credentials, credentialsFor, forgetCredentials, NoAccountError } from "../_shared/account.ts";
 import type { MessageContent } from "../_shared/types.ts";
 import { requireService } from "../_shared/auth.ts";
 
@@ -29,8 +33,8 @@ const sql = db();
 
 const MAX_ATTEMPTS = 6;
 const HOUR_MS = 60 * 60 * 1000;
-/** How long each breaker reason stops every send. */
-const PAUSE_MINUTES = { rate: 60, blocked: 24 * 60, auth: 30 } as const;
+/** How long each breaker reason stops a workspace's sends. */
+const PAUSE_MINUTES = { rate: 60, blocked: 24 * 60, auth: 30, account: 30 } as const;
 /** Meta's usage headers past this share of the quota stop sending before Meta has to. */
 const USAGE_PAUSE_PERCENT = 80;
 /** How long one worker keeps waiting for paused rows. Under the 55 s pg_net call timeout. */
@@ -39,6 +43,7 @@ const WAIT_BUDGET_MS = 40_000;
 const POLL_MS = 1_500;
 /** Rows still unsent this long after a run started go back for the next run. */
 const RUN_BUDGET_MS = 50_000;
+const LEASE = "send-worker";
 
 /** 1m, 2m, 4m, 8m, 16m, capped at an hour. */
 function backoffMs(attempts: number): number {
@@ -64,9 +69,9 @@ async function expireStale(): Promise<number> {
   return data?.length ?? 0;
 }
 
-async function pause(minutes: number, reason: string): Promise<void> {
-  console.warn(`sending paused for ${minutes} min: ${reason}`);
-  const { error } = await sql.rpc("pause_sending", { p_minutes: Math.ceil(minutes), p_reason: reason });
+async function pause(ws: string, minutes: number, reason: string): Promise<void> {
+  console.warn(`sending paused for workspace ${ws}, ${minutes} min: ${reason}`);
+  const { error } = await sql.rpc("pause_sending", { p_workspace: ws, p_minutes: Math.ceil(minutes), p_reason: reason });
   if (error) console.error("pause_sending failed:", error.message);
 }
 
@@ -76,12 +81,12 @@ async function release(rows: Row[]): Promise<void> {
   await sql.from("send_queue").update({ status: "pending" }).in("id", rows.map((r) => r.id));
 }
 
-function deliver(row: Row, igsid: string | undefined): Promise<Record<string, unknown>> {
+function deliver(creds: Credentials, row: Row, igsid: string | undefined): Promise<Record<string, unknown>> {
   const content = (row.payload ?? {}) as MessageContent;
-  if (row.send_type === "private_reply") return sendPrivateReply(row.comment_id, content);
-  if (row.send_type === "public_reply") return replyToComment(row.comment_id, String(content.text ?? ""));
+  if (row.send_type === "private_reply") return sendPrivateReply(creds, row.comment_id, content);
+  if (row.send_type === "public_reply") return replyToComment(creds, row.comment_id, String(content.text ?? ""));
   if (!igsid) throw new Error("Contact has no Instagram id");
-  return sendDirectMessage(igsid, content);
+  return sendDirectMessage(creds, igsid, content);
 }
 
 async function markSent(row: Row, metaMessageId: string | null): Promise<void> {
@@ -98,6 +103,7 @@ async function markSent(row: Row, metaMessageId: string | null): Promise<void> {
   // A reply under a comment is public, not part of the DM thread.
   if (row.send_type === "public_reply") return;
   await sql.from("message").insert({
+    workspace_id: row.workspace_id,
     contact_id: row.contact_id,
     direction: "out",
     payload: row.payload,
@@ -144,12 +150,14 @@ const BREAKER_REASON = {
   rate: "Meta rate-limited the account",
   blocked: "Meta blocked the account from this action",
   auth: "Instagram access stopped working; reconnect the account",
+  account: "No Instagram account is connected to this workspace",
 } as const;
 
 interface Round {
   sent: number;
   claimed: number;
-  stopped: string | null;
+  /** Workspaces whose sending stopped this round, with the reason. */
+  stopped: Record<string, string>;
 }
 
 /** Claim what the limits allow right now and send it. */
@@ -167,49 +175,82 @@ async function round(deadline: number): Promise<Round> {
   // The claim returns plain rows; look up each contact's igsid in one read.
   const ids = [...new Set(rows.map((r) => r.contact_id))];
   const { data: contacts } = ids.length
-    ? await sql.from("contact").select("id, igsid").in("id", ids)
+    ? await sql.from("contact").select("id, igsid, workspace_id").in("id", ids)
     : { data: [] as Row[] };
-  const igsidOf = new Map((contacts ?? []).map((c: Row) => [c.id, c.igsid]));
+  const contactOf = new Map((contacts ?? []).map((c: Row) => [c.id, c]));
 
   let sent = 0;
-  let stopped: string | null = null;
+  const stopped: Record<string, string> = {};
+  const held: Row[] = []; // rows of a workspace that stopped this round: handed back at the end
+  const lastSendAt = new Map<string, number>();
 
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
-    if (i > 0 && !isReactive(row)) await sleep(gapMs());
+    const ws: string = row.workspace_id;
+    if (stopped[ws]) {
+      held.push(row);
+      continue;
+    }
     if (Date.now() > deadline) {
-      await release(rows.slice(i));
+      held.push(...rows.slice(i));
       break;
     }
 
+    let creds: Credentials;
     try {
-      const result = await deliver(row, igsidOf.get(row.contact_id));
+      creds = await credentialsFor(ws);
+    } catch (err) {
+      if (!(err instanceof NoAccountError)) throw err;
+      stopped[ws] = BREAKER_REASON.account;
+      await pause(ws, PAUSE_MINUTES.account, stopped[ws]);
+      held.push(row);
+      continue;
+    }
+
+    // Space out sends nobody is waiting on, per account: one workspace's broadcast does not slow
+    // another workspace's replies.
+    if (!isReactive(row)) {
+      const wait = (lastSendAt.get(ws) ?? 0) + gapMs() - Date.now();
+      if (wait > 0) await sleep(wait);
+    }
+
+    const contact = contactOf.get(row.contact_id);
+    try {
+      // The foreign keys keep a row and its contact in one workspace; never send across.
+      if (contact && contact.workspace_id !== ws) throw new MetaError("Contact belongs to another workspace", 400);
+      const result = await deliver(creds, row, contact?.igsid);
       await markSent(row, ((result.message_id ?? result.id) as string) ?? null);
       sent++;
     } catch (err) {
       const breaker = err instanceof MetaError ? err.breaker : null;
       if (breaker) {
-        stopped = `${BREAKER_REASON[breaker]}: ${(err as Error).message}`;
-        await pause(PAUSE_MINUTES[breaker], stopped);
+        stopped[ws] = `${BREAKER_REASON[breaker]}: ${(err as Error).message}`;
+        await pause(ws, PAUSE_MINUTES[breaker], stopped[ws]);
         if (breaker === "auth") {
-          await sql.from("ig_account").update({ status: "needs_reconnect" }).eq("status", "connected");
+          forgetCredentials(ws);
+          await sql
+            .from("ig_account")
+            .update({ status: "needs_reconnect" })
+            .eq("workspace_id", ws)
+            .eq("status", "connected");
         }
-        await release(rows.slice(i));
-        break;
+        held.push(row);
+        continue;
       }
       console.error(`send_queue ${row.id} failed:`, err);
       await markFailure(row, err);
+    } finally {
+      lastSendAt.set(ws, Date.now());
     }
 
     const pressure = usagePressure();
     if (pressure && pressure.percent >= USAGE_PAUSE_PERCENT) {
-      stopped = `Meta reports ${pressure.percent}% of the call quota used`;
-      await pause(Math.max(15, pressure.regainMinutes), stopped);
-      await release(rows.slice(i + 1));
-      break;
+      stopped[ws] = `Meta reports ${pressure.percent}% of the call quota used`;
+      await pause(ws, Math.max(15, pressure.regainMinutes), stopped[ws]);
     }
   }
 
+  await release(held);
   return { sent, claimed: rows.length, stopped };
 }
 
@@ -227,16 +268,16 @@ async function nextDue(): Promise<number | null> {
 /** Take the waiting lease; false when another worker already holds it. */
 async function takeWait(until: string): Promise<boolean> {
   const { data } = await sql
-    .from("send_guard")
-    .update({ waiting_until: until })
-    .eq("id", 1)
-    .or(`waiting_until.is.null,waiting_until.lt.${new Date().toISOString()}`)
-    .select("id");
+    .from("worker_lease")
+    .update({ until })
+    .eq("name", LEASE)
+    .or(`until.is.null,until.lt.${new Date().toISOString()}`)
+    .select("name");
   return Boolean(data?.length);
 }
 
 async function releaseWait(until: string): Promise<void> {
-  await sql.from("send_guard").update({ waiting_until: null }).eq("id", 1).eq("waiting_until", until);
+  await sql.from("worker_lease").update({ until: null }).eq("name", LEASE).eq("until", until);
 }
 
 Deno.serve(async (req) => {
@@ -246,12 +287,14 @@ Deno.serve(async (req) => {
   try {
     const expired = await expireStale();
     const total = { sent: 0, claimed: 0, rounds: 1 };
+    const stopped: Record<string, string> = {};
     let r = await round(started + RUN_BUDGET_MS);
     total.sent += r.sent;
     total.claimed += r.claimed;
+    Object.assign(stopped, r.stopped);
 
     const lease = new Date(started + WAIT_BUDGET_MS + 10_000).toISOString();
-    if (!r.stopped && (await takeWait(lease))) {
+    if (await takeWait(lease)) {
       try {
         while (Date.now() - started < WAIT_BUDGET_MS) {
           const due = await nextDue();
@@ -264,15 +307,16 @@ Deno.serve(async (req) => {
           total.rounds++;
           total.sent += r.sent;
           total.claimed += r.claimed;
+          Object.assign(stopped, r.stopped);
           // Due but nothing claimable: a limit is reached or sending is paused. Leave it to cron.
-          if (r.stopped || r.claimed === 0) break;
+          if (r.claimed === 0) break;
         }
       } finally {
         await releaseWait(lease);
       }
     }
 
-    return json({ ...total, expired, stopped: r.stopped });
+    return json({ ...total, expired, stopped });
   } catch (err) {
     console.error("send-worker failed:", err);
     return json({ error: String(err) }, 500);

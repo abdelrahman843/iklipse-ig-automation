@@ -41,7 +41,7 @@ export function PostPicker({
       setError(null);
       try {
         const { data } = await supabase.auth.getSession();
-        const bearer = data.session?.access_token ?? (import.meta.env.VITE_SUPABASE_ANON_KEY as string);
+        const bearer = data.session?.access_token ?? "";
         const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ig-media`, {
           headers: { authorization: `Bearer ${bearer}` },
         });
