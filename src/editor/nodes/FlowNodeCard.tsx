@@ -4,6 +4,7 @@ import { CATEGORY_ACCENT, def } from "../nodeDefs";
 import { useEditor } from "../store";
 import type { FlowNodeData } from "../adapter";
 import { describeDelay } from "../../lib/time";
+import { exits } from "../../lib/graph";
 import { IgChat, IgLogo, NODE_ICON } from "./icons";
 
 /** A small "N reached" badge, shown when the engine has recorded arrivals at this step. */
@@ -38,8 +39,10 @@ function useIssueRing(id: string): CSSProperties {
 /** Nodes that speak to the contact are drawn as a real Instagram message, not a generic box. */
 const PREVIEW = new Set(["send_message", "collect"]);
 
-function outputs(type: FlowNodeData["nodeType"]) {
-  return def(type).outputs;
+/** A randomize node has one handle per branch (A, B, C…); every other type has fixed exits. */
+function outputs(node: FlowNodeData["flowNode"]) {
+  if (node.type === "randomize") return exits(node).map((e) => ({ key: String(e.key), label: e.label }));
+  return def(node.type).outputs;
 }
 
 const ACTION_VERB: Record<string, string> = {
@@ -107,8 +110,8 @@ function summary(data: FlowNodeData): string {
   }
 }
 
-function OutHandles({ type, accent }: { type: FlowNodeData["nodeType"]; accent: string }) {
-  const outs = outputs(type);
+function OutHandles({ node, accent }: { node: FlowNodeData["flowNode"]; accent: string }) {
+  const outs = outputs(node);
   if (!outs.length) return null;
   return (
     <div className="relative" style={{ height: outs.some((o) => o.label) ? 26 : 12 }}>
@@ -207,7 +210,7 @@ export function FlowNodeCard({ id, data, selected }: NodeProps) {
           })()}
         </div>
 
-        <div className="px-3 pb-2"><OutHandles type={d.nodeType} accent={accent} /></div>
+        <div className="px-3 pb-2"><OutHandles node={n} accent={accent} /></div>
       </div>
     );
   }
@@ -224,7 +227,7 @@ export function FlowNodeCard({ id, data, selected }: NodeProps) {
         {definition.pauses && <span className="text-[9px] uppercase tracking-wider font-mono" style={{ color: "var(--burn)" }}>pauses</span>}
       </div>
       <div className="px-3 py-2 text-[11px] leading-snug min-h-[16px] break-words" style={{ color: "var(--ink-soft)" }}>{summary(d)}</div>
-      <div className="px-3 pb-2"><OutHandles type={d.nodeType} accent={accent} /></div>
+      <div className="px-3 pb-2"><OutHandles node={n} accent={accent} /></div>
     </div>
   );
 }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 import { Loader } from "../components/Loader";
@@ -98,7 +98,12 @@ export function Broadcasts() {
     create({ name: flow.name, flow_id: flow.id, content: { blocks: [] } });
   };
 
+  // A second click while a copy is being made would make a second copy.
+  const duplicating = useRef(false);
+
   async function duplicate(b: Broadcast) {
+    if (duplicating.current) return;
+    duplicating.current = true;
     const { error } = await supabase.from("broadcast").insert({
       name: `${b.name} (copy)`,
       content: b.content,
@@ -106,6 +111,7 @@ export function Broadcasts() {
       flow_id: b.flow_id,
       segment_tag: b.segment_tag,
     });
+    duplicating.current = false;
     if (error) return toast.error(error);
     toast.success("Copied to Drafts");
     load();
@@ -178,7 +184,7 @@ export function Broadcasts() {
                 </thead>
                 <tbody>
                   {list.map((b) => (
-                    <tr key={b.id} onClick={() => open(b)} tabIndex={0} onKeyDown={(e) => e.key === "Enter" && open(b)}>
+                    <tr key={b.id} onClick={() => open(b)} tabIndex={0} onKeyDown={(e) => e.key === "Enter" && e.target === e.currentTarget && open(b)}>
                       <td className="col-menu">
                         <RowMenu items={[
                           { label: "Edit", onSelect: () => open(b) },
@@ -205,7 +211,7 @@ export function Broadcasts() {
                   </thead>
                   <tbody>
                     {list.map((b) => (
-                      <tr key={b.id} onClick={() => open(b)} tabIndex={0} onKeyDown={(e) => e.key === "Enter" && open(b)}>
+                      <tr key={b.id} onClick={() => open(b)} tabIndex={0} onKeyDown={(e) => e.key === "Enter" && e.target === e.currentTarget && open(b)}>
                         <td className="col-menu">
                           <RowMenu items={[
                             { label: "View", onSelect: () => open(b) },
@@ -238,7 +244,7 @@ export function Broadcasts() {
                   {list.map((b) => {
                     const s = stats[b.id];
                     return (
-                      <tr key={b.id} onClick={() => open(b)} tabIndex={0} onKeyDown={(e) => e.key === "Enter" && open(b)}>
+                      <tr key={b.id} onClick={() => open(b)} tabIndex={0} onKeyDown={(e) => e.key === "Enter" && e.target === e.currentTarget && open(b)}>
                         <td className="col-menu">
                           <RowMenu items={[
                             { label: "View", onSelect: () => open(b) },

@@ -18,6 +18,10 @@ type Row = Record<string, any>;
 const sql = db();
 
 const EVENT_BATCH = 50;
+/** Due runs one pass resumes; the rest wait for the next pass instead of outliving this one. */
+const RESUME_BATCH = 50;
+/** A run still "running" this long after its last write was cut off mid-step. */
+const STALLED_MS = 10 * 60 * 1000;
 const MAX_STEPS = 50; // a graph that loops forever should stop, not spin
 // A loop through a delay resets MAX_STEPS on every resume, so cap what one run can actually send.
 const MAX_SENDS_PER_RUN = 20;
@@ -36,6 +40,9 @@ function after([min, max]: [number, number]): string {
   return new Date(Date.now() + min + Math.random() * (max - min)).toISOString();
 }
 
+/** When each run's held private reply goes out, so its DMs queue behind it. Per invocation. */
+let privateReplyDue = new Map<string, number>();
+let currentEvent: string | null = null; // the webhook_event being handled, for firstSighting
 let queued = 0; // sends enqueued during this invocation, so we know whether to wake the sender
 
 // ---------------------------------------------------------------- contacts
@@ -233,6 +240,15 @@ async function enqueue(
   const windowEnds = new Date(contact.last_interaction_at ?? Date.now()).getTime() + WINDOW_MS;
   // A live-comment reply is only valid while the broadcast runs, so it expires in minutes.
   const replyTtl = run.state?.live ? LIVE_REPLY_TTL_MS : PRIVATE_REPLY_TTL_MS;
+  // The private reply waits a few human seconds. A DM from the same run (a contact whose window
+  // is already open) must not overtake it, so it waits until just after.
+  let dueAt: string | undefined;
+  if (kind === "private_reply" && !run.state?.live) {
+    dueAt = after(PRIVATE_REPLY_PAUSE_MS);
+    privateReplyDue.set(run.id, new Date(dueAt).getTime());
+  } else if (kind === "dm" && (privateReplyDue.get(run.id) ?? 0) > Date.now()) {
+    dueAt = new Date(privateReplyDue.get(run.id)! + 3_000).toISOString();
+  }
 
   const { error } = await sql.from("send_queue").insert({
     contact_id: contact.id,
@@ -251,7 +267,7 @@ async function enqueue(
         ? new Date(commentAt + replyTtl).toISOString()
         : new Date(windowEnds).toISOString(),
     // A live comment is answered at once: the reply is only valid while the broadcast runs.
-    ...(kind === "private_reply" && !run.state?.live ? { next_attempt_at: after(PRIVATE_REPLY_PAUSE_MS) } : {}),
+    ...(dueAt ? { next_attempt_at: dueAt } : {}),
   });
   if (error) throw new Error(`send_queue insert failed: ${error.message}`);
   queued++;
@@ -393,6 +409,7 @@ async function runActions(node: FlowNode, state: Row, contact: Row, run: Row): P
           const value = interpolate(a.value ?? "", state, contact);
           const fields = { ...(contact.custom_fields ?? {}), [a.field]: value };
           await sql.from("contact").update({ custom_fields: fields }).eq("id", contact.id);
+          contact.custom_fields = fields; // the next action in this step builds on this one
           await sql.from("custom_field").upsert({ key: a.field, type: "text" }, { onConflict: "key" });
           break;
         }
@@ -401,6 +418,7 @@ async function runActions(node: FlowNode, state: Row, contact: Row, run: Row): P
           const fields = { ...(contact.custom_fields ?? {}) };
           delete fields[a.field];
           await sql.from("contact").update({ custom_fields: fields }).eq("id", contact.id);
+          contact.custom_fields = fields;
           break;
         }
         case "assign":
@@ -454,13 +472,21 @@ async function runActions(node: FlowNode, state: Row, contact: Row, run: Row): P
           break;
         case "subscribe_sequence": {
           if (!a.sequenceId) break;
-          // Start at step 0, due immediately; the sequence worker takes it from there.
+          // Start at step 0, due after the first message's own delay; the sequence worker
+          // takes it from there.
+          const { data: first } = await sql
+            .from("sequence_step")
+            .select("delay_seconds")
+            .eq("sequence_id", a.sequenceId)
+            .order("sort")
+            .limit(1)
+            .maybeSingle();
           await sql.from("sequence_subscription").upsert(
             {
               sequence_id: a.sequenceId,
               contact_id: contact.id,
               step: 0,
-              next_send_at: new Date().toISOString(),
+              next_send_at: new Date(Date.now() + Number(first?.delay_seconds ?? 0) * 1000).toISOString(),
               status: "active",
             },
             { onConflict: "sequence_id,contact_id" },
@@ -630,7 +656,8 @@ async function executeRun(runId: string): Promise<void> {
 
   const graph = (flow.graph ?? {}) as FlowGraph;
   const state: Row = { ...(run.state ?? {}) };
-  let current: string | undefined | null = run.current_node_id ?? graph.start;
+  // Every run is created on its first step, so no current step means the flow has ended.
+  let current: string | undefined | null = run.current_node_id;
 
   for (let step = 0; step < MAX_STEPS; step++) {
     if (!current) {
@@ -720,7 +747,9 @@ async function executeRun(runId: string): Promise<void> {
       }
 
       case "randomize": {
-        current = pickBranch(node) as string | undefined;
+        // The branch key ("b0") is where the editor stores the step that branch leads to.
+        const key = pickBranch(node);
+        current = key ? ((node as Row)[key] as string | undefined) ?? null : null;
         break;
       }
 
@@ -946,7 +975,7 @@ async function startRun(flow: Row, contact: Row, seed: Row): Promise<string | nu
     if (error.code === "23505") return null;
     throw new Error(`flow_run insert failed: ${error.message}`);
   }
-  await executeRun(data.id);
+  await executeSafely(data.id);
   return data.id;
 }
 
@@ -971,7 +1000,7 @@ async function resumeCollect(run: Row, text: string, contact: Row): Promise<void
   if (c.skipPayload && text === c.skipPayload) {
     delete state.collect;
     await saveRun(run.id, { state, current_node_id: c.next ?? null, resume_at: null });
-    await executeRun(run.id);
+    await executeSafely(run.id);
     return;
   }
 
@@ -981,7 +1010,7 @@ async function resumeCollect(run: Row, text: string, contact: Row): Promise<void
     state[c.saveTo] = value;
     delete state.collect;
     await saveRun(run.id, { state, current_node_id: c.next ?? null, resume_at: null });
-    await executeRun(run.id);
+    await executeSafely(run.id);
     return;
   }
 
@@ -989,7 +1018,7 @@ async function resumeCollect(run: Row, text: string, contact: Row): Promise<void
   if (attempts >= (c.maxAttempts ?? 3)) {
     delete state.collect;
     await saveRun(run.id, { state, current_node_id: c.onFailed ?? null, resume_at: null });
-    await executeRun(run.id);
+    await executeSafely(run.id);
     return;
   }
 
@@ -1033,7 +1062,7 @@ async function resumeWithReply(run: Row, text: string, contact: Row): Promise<vo
     .select();
   if (!claimed?.length) return;
 
-  await executeRun(run.id);
+  await executeSafely(run.id);
 }
 
 // ---------------------------------------------------------------- event handlers
@@ -1100,13 +1129,17 @@ async function firstSighting(key: string | null): Promise<boolean> {
   if (!key) return true;
   const { data, error } = await sql
     .from("seen_item")
-    .upsert({ key }, { onConflict: "key", ignoreDuplicates: true })
+    .upsert({ key, event_id: currentEvent }, { onConflict: "key", ignoreDuplicates: true })
     .select("key");
   if (error) {
     console.warn("seen_item insert failed:", error.message);
     return true; // better a rare duplicate than a dropped message
   }
-  return Boolean(data?.length);
+  if (data?.length) return true;
+  // Seen before. A retry of the event that recorded it, after that try failed, still handles it.
+  if (!currentEvent) return false;
+  const { data: prior } = await sql.from("seen_item").select("event_id").eq("key", key).maybeSingle();
+  return prior?.event_id === currentEvent;
 }
 
 /** An inbound message: record it, resume a waiting run, or match a trigger. */
@@ -1233,38 +1266,66 @@ async function processInbox(): Promise<number> {
 
   let handled = 0;
   for (const event of events ?? []) {
+    currentEvent = event.id;
     try {
       for (const entry of event.raw?.entry ?? []) await handleEntry(entry, flows);
+      await sql.from("webhook_event").update({ done_at: new Date().toISOString(), error: null }).eq("id", event.id);
       handled++;
     } catch (err) {
+      // Left without done_at, so claim_webhook_events retries it a few minutes on.
       await sql.from("webhook_event").update({ error: String(err) }).eq("id", event.id);
-      console.error(`webhook_event ${event.id} failed:`, err);
+      console.error(`webhook_event ${event.id} failed (try ${event.attempts ?? 1}):`, err);
+    } finally {
+      currentEvent = null;
     }
   }
   return handled;
 }
 
+/** Claim up to RESUME_BATCH due runs in one status. A run another worker took no longer matches. */
+async function claimDue(status: string, now: string, patch: Row): Promise<Row[]> {
+  const { data: due } = await sql
+    .from("flow_run")
+    .select("id")
+    .eq("status", status)
+    .lte("resume_at", now)
+    .order("resume_at")
+    .limit(RESUME_BATCH);
+  if (!due?.length) return [];
+  const { data } = await sql
+    .from("flow_run")
+    .update({ status: "running", ...patch })
+    .in("id", due.map((r: Row) => r.id))
+    .eq("status", status)
+    .select();
+  return data ?? [];
+}
+
+/** Run one claimed run. If it throws, fail it with the reason instead of leaving it "running". */
+async function executeSafely(runId: string): Promise<void> {
+  try {
+    await executeRun(runId);
+  } catch (err) {
+    console.error(`flow_run ${runId} failed:`, err);
+    await saveRun(runId, { status: "failed", error: `Stopped by an error: ${String(err)}`, resume_at: null }).catch(() => {});
+  }
+}
+
 async function resumeDue(): Promise<number> {
   const now = new Date().toISOString();
 
-  // Each update claims its rows: a run another worker already picked up no longer matches.
-  const { data: delayed } = await sql
+  // A run left "running" by a pass that was cut off would block its contact for good.
+  await sql
     .from("flow_run")
-    .update({ status: "running", resume_at: null })
-    .eq("status", "waiting_delay")
-    .lte("resume_at", now)
-    .select();
+    .update({ status: "failed", error: "Stopped: the engine was interrupted in the middle of this run" })
+    .eq("status", "running")
+    .lt("updated_at", new Date(Date.now() - STALLED_MS).toISOString());
 
-  for (const run of delayed ?? []) await executeRun(run.id);
+  const delayed = await claimDue("waiting_delay", now, { resume_at: null });
+  for (const run of delayed) await executeSafely(run.id);
 
-  const { data: timedOut } = await sql
-    .from("flow_run")
-    .update({ status: "running" })
-    .eq("status", "waiting_input")
-    .lte("resume_at", now)
-    .select();
-
-  for (const run of timedOut ?? []) {
+  const timedOut = await claimDue("waiting_input", now, {});
+  for (const run of timedOut) {
     const state = { ...(run.state ?? {}) };
     let target: string | null = null;
     if (state.wait) {
@@ -1275,16 +1336,17 @@ async function resumeDue(): Promise<number> {
       delete state.collect;
     }
     await saveRun(run.id, { state, current_node_id: target, resume_at: null });
-    await executeRun(run.id);
+    await executeSafely(run.id);
   }
 
-  return (delayed?.length ?? 0) + (timedOut?.length ?? 0);
+  return delayed.length + timedOut.length;
 }
 
 Deno.serve(async (req) => {
   const denied = requireService(req);
   if (denied) return denied;
   queued = 0;
+  privateReplyDue = new Map();
   optSettings = undefined;
   profileFetches = new Map();
   publicPaused = undefined;

@@ -65,6 +65,9 @@ export function InstagramSettings() {
   const [handlers, setHandlers] = useState<Partial<Record<TriggerType, Handler[]>>>({});
   const [error, setError] = useState<string | null>(null);
   const [openOpt, setOpenOpt] = useState<"opt_in" | "opt_out" | null>(null);
+  // The reply automations failed to load: say so, rather than offer to create a second one.
+  const [handlersError, setHandlersError] = useState<string | null>(null);
+  const [creating, setCreating] = useState<TriggerType | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -78,6 +81,7 @@ export function InstagramSettings() {
             .is("deleted_at", null),
         ]);
         setProfile(p);
+        setHandlersError(flows.error ? `Could not load reply automations: ${friendlyError(flows.error)}` : null);
         const by: Partial<Record<TriggerType, Handler[]>> = {};
         for (const f of flows.data ?? []) (by[f.trigger_type as TriggerType] ??= []).push(f as Handler);
         setHandlers(by);
@@ -88,10 +92,13 @@ export function InstagramSettings() {
   }, []);
 
   async function createReply(trigger: TriggerType, name: string) {
+    if (creating) return;
+    setCreating(trigger);
     try {
       navigate(`/flows/${await createFlow(name, trigger)}`);
     } catch (err) {
       toast.error(err);
+      setCreating(null);
     }
   }
 
@@ -103,7 +110,9 @@ export function InstagramSettings() {
     const live = list.filter((h) => h.status === "live");
     return (
       <SettingRow title={title} about={about}>
-        {list.length ? (
+        {handlersError ? (
+          <span className="mono field-warn">{handlersError}</span>
+        ) : list.length ? (
           <div className="stack" style={{ gap: 6 }}>
             {list.map((h) => (
               <Link key={h.id} className="handler-link" to={`/flows/${h.id}`}>
@@ -115,7 +124,13 @@ export function InstagramSettings() {
             {!live.length && <span className="mono field-warn">None is active, so nothing runs yet.</span>}
           </div>
         ) : (
-          <button className="btn" onClick={() => createReply(trigger, name)}>Create New Reply</button>
+          <button
+            className={`btn ${creating === trigger ? "is-busy" : ""}`}
+            disabled={creating !== null}
+            onClick={() => createReply(trigger, name)}
+          >
+            Create New Reply
+          </button>
         )}
       </SettingRow>
     );
@@ -405,7 +420,8 @@ function ReplyPop({
 async function newReplyFlow(name: string): Promise<string | null> {
   try {
     const id = await createFlow(name || "Reply");
-    window.open(`/flows/${id}`, "_blank", "noopener");
+    // BASE_URL keeps the GitHub Pages sub-path; a bare /flows/… would leave the app.
+    window.open(`${import.meta.env.BASE_URL}flows/${id}`, "_blank", "noopener");
     toast.success("Automation created. Build it in the new tab, then publish here.");
     return id;
   } catch (err) {

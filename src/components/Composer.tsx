@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useRef, type ReactNode } from "react";
 import { blankBlock, blockKind, type Block, type BlockKind } from "../lib/content";
 import type { MessageButton, MessageCard } from "../lib/types";
 import { ImageField } from "./ImageField";
@@ -59,7 +59,11 @@ export function Composer({
   /** Extra controls shown under the blocks (e.g. "Send an automation instead"). */
   aside?: ReactNode;
 }) {
-  const set = (i: number, b: Block) => onChange(blocks.map((x, j) => (j === i ? b : x)));
+  // An image upload lands after an await; build on the newest blocks, not the ones from when it
+  // started, so edits made meanwhile are kept.
+  const latest = useRef(blocks);
+  latest.current = blocks;
+  const set = (i: number, b: Block) => onChange(latest.current.map((x, j) => (j === i ? b : x)));
   const move = (i: number, by: number) => {
     const next = [...blocks];
     const [b] = next.splice(i, 1);
@@ -84,7 +88,7 @@ export function Composer({
                   </span>
                 )}
               </div>
-              <BlockEditor block={b} onChange={(nb) => set(i, nb)} disabled={disabled} />
+              <BlockEditor block={b} current={() => latest.current[i] ?? b} onChange={(nb) => set(i, nb)} disabled={disabled} />
             </div>
           ))}
         </div>
@@ -113,7 +117,18 @@ export function Composer({
   );
 }
 
-function BlockEditor({ block, onChange, disabled }: { block: Block; onChange: (b: Block) => void; disabled?: boolean }) {
+function BlockEditor({
+  block,
+  current,
+  onChange,
+  disabled,
+}: {
+  block: Block;
+  /** The block as it is now, for a write that lands after an upload. */
+  current: () => Block;
+  onChange: (b: Block) => void;
+  disabled?: boolean;
+}) {
   const kind = blockKind(block);
 
   if (kind === "image") {
@@ -136,7 +151,15 @@ function BlockEditor({ block, onChange, disabled }: { block: Block; onChange: (b
                 </button>
               )}
             </div>
-            <ImageField compact value={c.imageUrl ?? ""} onChange={(imageUrl) => setCard(i, { imageUrl })} disabled={disabled} />
+            <ImageField
+              compact
+              value={c.imageUrl ?? ""}
+              onChange={(imageUrl) => {
+                const now = current();
+                onChange({ ...now, cards: (now.cards ?? []).map((x, j) => (j === i ? { ...x, imageUrl } : x)) });
+              }}
+              disabled={disabled}
+            />
             <input className="input" placeholder="Title" maxLength={80} value={c.title} disabled={disabled} onChange={(e) => setCard(i, { title: e.target.value })} />
             <input className="input" placeholder="Subtitle (optional)" maxLength={80} value={c.subtitle ?? ""} disabled={disabled} onChange={(e) => setCard(i, { subtitle: e.target.value })} />
             <Buttons buttons={c.buttons ?? []} onChange={(buttons) => setCard(i, { buttons })} disabled={disabled} />

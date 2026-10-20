@@ -211,7 +211,14 @@ export function Conversations() {
         .limit(200);
       if (error) throw error;
       const rows = (data ?? []) as Contact[];
-      setContacts(rows);
+      // A conversation opened from Contacts can sit outside the newest 200; keep it in the list
+      // so the poll doesn't drop the thread that is on screen.
+      setContacts((prev) => {
+        const open = currentRef.current;
+        if (!open || rows.some((r) => r.id === open)) return rows;
+        const kept = prev.find((c) => c.id === open);
+        return kept ? [kept, ...rows] : rows;
+      });
       setError(null);
 
       // One query for last-message previews across the list, reduced to newest-per-contact.
@@ -451,9 +458,10 @@ export function Conversations() {
     const body = text;
     return run("send", async () => {
       await callInbox({ contactId: id, text: body });
-      // The person may have opened someone else while this was in flight.
-      if (currentRef.current === id) setText("");
-      else delete drafts.current[id];
+      // The person may have opened someone else, or kept typing, while this was in flight:
+      // only clear what was actually sent.
+      if (currentRef.current === id) setText((t) => (t === body ? "" : t));
+      else if (drafts.current[id] === body) delete drafts.current[id];
       if (currentRef.current === id) await loadThread(id);
       loadContacts();
     });
@@ -477,7 +485,7 @@ export function Conversations() {
     return run("note", async () => {
       const { error } = await supabase.from("contact_note").insert({ contact_id: id, body, author: me });
       if (error) throw error;
-      if (currentRef.current === id) setText("");
+      if (currentRef.current === id) setText((t) => (t.trim() === body ? "" : t));
       if (currentRef.current === id) await loadThread(id);
     });
   }

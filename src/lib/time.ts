@@ -18,7 +18,7 @@ export function relativeTime(iso: string | null): string {
   if (hours < 24) return `${hours}h ago`;
   const days = Math.round(hours / 24);
   if (days < 30) return `${days}d ago`;
-  return new Date(iso).toLocaleDateString();
+  return new Date(iso).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
 }
 
 export function clockTime(iso: string): string {

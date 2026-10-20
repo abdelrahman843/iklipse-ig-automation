@@ -26,8 +26,11 @@ async function refreshOne(sql: ReturnType<typeof db>, acct: Record<string, any>)
   const body = await res.json().catch(() => ({}));
 
   if (!res.ok || !body.access_token) {
-    await sql.from("ig_account").update({ status: "needs_reconnect" }).eq("id", acct.id);
-    console.error(`refresh failed for ${acct.ig_user_id}:`, body.error?.message ?? res.status);
+    // Only a dead token needs a reconnect. A Meta hiccup (5xx, rate limit) leaves the stored
+    // token working; tomorrow's run tries again, well inside its last week.
+    const dead = body.error?.code === 190;
+    if (dead) await sql.from("ig_account").update({ status: "needs_reconnect" }).eq("id", acct.id);
+    console.error(`refresh failed for ${acct.ig_user_id}${dead ? "" : " (will retry)"}:`, body.error?.message ?? res.status);
     return false;
   }
 

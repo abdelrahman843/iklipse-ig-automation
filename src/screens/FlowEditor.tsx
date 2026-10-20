@@ -16,6 +16,8 @@ import { IssuesMenu } from "../editor/IssuesMenu";
 import { loadFailures, type Failure } from "../lib/flowFailures";
 import type { Flow, FlowFolder } from "../lib/types";
 
+const MISSING_FLOW = "This automation doesn't exist or was deleted.";
+
 type Compiled = ReturnType<ReturnType<typeof useEditor.getState>["compile"]>;
 
 /**
@@ -92,9 +94,13 @@ export function FlowEditor() {
   const [failures, setFailures] = useState<Failure[]>([]);
 
   useEffect(() => {
+    // A late answer for the flow we just left must not load into the editor of this one.
+    let cancelled = false;
+    setLoadError(null);
     (async () => {
       try {
         const { data, error } = await supabase.from("flow").select("*").eq("id", id).single();
+        if (cancelled) return;
         if (error) throw error;
         const f = data as Flow;
         commitFlow(f);
@@ -107,14 +113,25 @@ export function FlowEditor() {
           .from("node_stat")
           .select("node_id, reached")
           .eq("flow_id", f.id);
+        if (cancelled) return;
         if (statsError) toast.error(statsError);
         const map: Record<string, number> = {};
         for (const row of stats ?? []) map[row.node_id as string] = Number(row.reached);
         setStats(map, map[f.graph?.start] ?? 0);
       } catch (err) {
-        setLoadError(`Could not load this flow: ${friendlyError(err)}`);
+        if (cancelled) return;
+        // No row (PGRST116) or a malformed id (22P02) both mean the link points at nothing.
+        const code = (err as { code?: string } | null)?.code;
+        setLoadError(
+          code === "PGRST116" || code === "22P02"
+            ? MISSING_FLOW
+            : `Could not load this flow: ${friendlyError(err)}`,
+        );
       }
     })();
+    return () => {
+      cancelled = true;
+    };
   }, [id, init, setStats]);
 
   // Validate the compiled graph — the same rules Meta enforces silently. Recomputes on any
@@ -344,7 +361,13 @@ export function FlowEditor() {
     toast.success("Changes discarded");
   }
 
-  if (loadError && !flow) return <div className="notice">{loadError}</div>;
+  if (loadError && !flow)
+    return (
+      <div className="notice">
+        {loadError}
+        {loadError === MISSING_FLOW && <> <Link to="/flows">Back to Automations</Link></>}
+      </div>
+    );
   if (!flow) return <div className="editor-root"><Loader label="Loading flow" /></div>;
 
   // Edits waiting for Publish: saved to the draft, or typed but not saved yet.

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { supabase } from "../lib/supabase";
 import { relativeTime } from "../lib/time";
+import { firstSendAt } from "../lib/content";
 import { Select } from "./Select";
 import { toast } from "./Toast";
 import { promptDialog } from "./Confirm";
@@ -64,7 +65,7 @@ export function ContactProfile({
   refreshKey?: unknown;
 }) {
   const [lists, setLists] = useState<Lists>({ agents: [], sequences: [], fields: [], tags: [], flows: {}, pauseMinutes: 30 });
-  const [runs, setRuns] = useState<FlowRun[]>([]);
+  const [runs, setRuns] = useState<FlowRun[] | null>(null);
   const [subs, setSubs] = useState<Sub[]>([]);
   const [newTag, setNewTag] = useState("");
   const [showPause, setShowPause] = useState(false);
@@ -102,9 +103,12 @@ export function ContactProfile({
       supabase.from("sequence_subscription").select("id, sequence_id, status").eq("contact_id", id).eq("status", "active"),
     ]);
     if (latest.current.id !== id) return;
-    if (!r.error) setRuns((r.data ?? []) as FlowRun[]);
+    setRuns(r.error ? [] : ((r.data ?? []) as FlowRun[]));
     if (!s.error) setSubs((s.data ?? []) as Sub[]);
   }
+
+  // A different contact: don't show the last one's automations while this one's load.
+  useEffect(() => setRuns(null), [contact.id]);
 
   useEffect(() => {
     setNewTag("");
@@ -118,26 +122,51 @@ export function ContactProfile({
     const onDown = (e: MouseEvent) => {
       if (!pauseRef.current?.contains(e.target as Node)) setShowPause(false);
     };
+    // Escape closes the menu only, not the profile drawer around it: caught first and stopped.
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.stopPropagation();
+      setShowPause(false);
+    };
     document.addEventListener("mousedown", onDown);
-    return () => document.removeEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey, true);
+    };
   }, [showPause]);
 
-  /** Show the change now, save it, put it back if the save fails. */
-  async function save(key: string, patch: Partial<Contact>, persist: () => PromiseLike<{ error: unknown }>, success?: string) {
-    if (busy) return;
-    const before = latest.current;
-    onChange({ ...before, ...patch });
-    setBusy(key);
-    try {
-      const { error } = await persist();
-      if (error) throw error;
-      if (success) toast.success(success);
-    } catch (err) {
-      onChange(before);
-      toast.error(err);
-    } finally {
-      setBusy(null);
-    }
+  // Saves run one after another: an edit made while one is in flight waits its turn rather than
+  // being dropped.
+  const queue = useRef<Promise<void>>(Promise.resolve());
+
+  /**
+   * Show the change now, save it, put it back if the save fails. A function patch is worked out
+   * when its turn comes, against the contact as it is then.
+   */
+  function save(
+    key: string,
+    patch: Partial<Contact> | ((c: Contact) => Partial<Contact>),
+    persist: () => PromiseLike<{ error: unknown }>,
+    success?: string,
+  ) {
+    const run = async () => {
+      const before = latest.current;
+      onChange({ ...before, ...(typeof patch === "function" ? patch(before) : patch) });
+      setBusy(key);
+      try {
+        const { error } = await persist();
+        if (error) throw error;
+        if (success) toast.success(success);
+      } catch (err) {
+        onChange(before);
+        toast.error(err);
+      } finally {
+        setBusy(null);
+      }
+    };
+    queue.current = queue.current.then(run);
+    return queue.current;
   }
 
   const update = (key: string, patch: Partial<Contact>, success?: string) =>
@@ -175,13 +204,13 @@ export function ContactProfile({
     setNewTag("");
     const c = latest.current;
     if (!tag || (c.tags ?? []).includes(tag)) return;
-    await save("tag", { tags: [...(c.tags ?? []), tag] }, () => supabase.rpc("add_contact_tag", { p_contact: c.id, p_tag: tag }));
+    await save("tag", (now) => ({ tags: [...(now.tags ?? []).filter((t) => t !== tag), tag] }), () => supabase.rpc("add_contact_tag", { p_contact: c.id, p_tag: tag }));
     if (!lists.tags.includes(tag)) setLists((l) => ({ ...l, tags: [...l.tags, tag].sort() }));
   }
 
   const removeTag = (tag: string) => {
     const c = latest.current;
-    return save("tag", { tags: (c.tags ?? []).filter((t) => t !== tag) }, () => supabase.rpc("remove_contact_tag", { p_contact: c.id, p_tag: tag }));
+    return save("tag", (now) => ({ tags: (now.tags ?? []).filter((t) => t !== tag) }), () => supabase.rpc("remove_contact_tag", { p_contact: c.id, p_tag: tag }));
   };
 
   const saveField = (key: string, value: string) =>
@@ -192,11 +221,18 @@ export function ContactProfile({
     const id = contact.id;
     const name = lists.sequences.find((s) => s.id === sequenceId)?.name ?? "the sequence";
     setBusy("seq");
-    // Same as an automation's "Subscribe to sequence" action: start at the first message.
-    const { error } = await supabase.from("sequence_subscription").upsert(
-      { sequence_id: sequenceId, contact_id: id, step: 0, next_send_at: new Date().toISOString(), status: "active" },
-      { onConflict: "sequence_id,contact_id" },
-    );
+    // Same as an automation's "Subscribe to sequence" action: start at the first message, due
+    // after its own delay.
+    let error: unknown = null;
+    try {
+      const next_send_at = await firstSendAt(sequenceId);
+      ({ error } = await supabase.from("sequence_subscription").upsert(
+        { sequence_id: sequenceId, contact_id: id, step: 0, next_send_at, status: "active" },
+        { onConflict: "sequence_id,contact_id" },
+      ));
+    } catch (err) {
+      error = err;
+    }
     setBusy(null);
     if (error) return toast.error(error);
     toast.success(`Subscribed to ${name}`);
@@ -366,7 +402,9 @@ export function ContactProfile({
       </Section>
 
       <Section title="Recent automations">
-        {runs.length === 0 ? (
+        {runs === null ? (
+          <p className="lc-help" style={{ marginTop: 0 }}>Loading…</p>
+        ) : runs.length === 0 ? (
           <p className="lc-help" style={{ marginTop: 0 }}>No automation has run for this contact yet.</p>
         ) : (
           <ul className="lc-list-plain">

@@ -213,7 +213,19 @@ const EXAMPLE_WORDS = ["Price", "Link", "Shop"];
 function KeywordFields({ cfg, onConfig, noun }: { cfg: TriggerConfig; onConfig: (patch: Partial<TriggerConfig>) => void; noun: string }) {
   const words = (cfg.keywords ?? []).filter(Boolean);
   const [mode, setMode] = useState<"specific" | "any">(words.length ? "specific" : "any");
-  const setWords = (v: string) => onConfig({ keywords: v.split(",").map((s) => s.trim()) });
+  // The box keeps exactly what was typed ("price, " included); the stored list is parsed from it.
+  // An outside change (undo, an example chip) that the text no longer matches resets the box.
+  const [text, setText] = useState(words.join(", "));
+  const parse = (v: string) => v.split(",").map((s) => s.trim()).filter(Boolean);
+  const joined = JSON.stringify(words);
+  useEffect(() => {
+    setText((t) => (JSON.stringify(parse(t)) === joined ? t : (JSON.parse(joined) as string[]).join(", ")));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [joined]);
+  const setWords = (v: string) => {
+    setText(v);
+    onConfig({ keywords: parse(v) });
+  };
   const addExample = (w: string) => {
     if (!words.some((x) => x.toLowerCase() === w.toLowerCase())) onConfig({ keywords: [...words, w] });
   };
@@ -238,7 +250,7 @@ function KeywordFields({ cfg, onConfig, noun }: { cfg: TriggerConfig; onConfig: 
               <input
                 className="input"
                 placeholder="Enter a word or multiple"
-                value={words.join(", ")}
+                value={text}
                 onChange={(e) => setWords(e.target.value)}
               />
               <span className="mono">Use commas to separate words</span>
@@ -430,6 +442,18 @@ function SendMessageFields({ node, onChange }: { node: FlowNode; onChange: (patc
   const extras = node.extras ?? [];
   const setContent = (p: Partial<typeof content>) => onChange({ content: { ...content, ...p } });
   const setButtons = (next: MessageButton[]) => setContent({ buttons: next });
+  // An upload finishes after an await, when `content` above may be several edits old: merge the
+  // image into what the store holds now, so typing done during the upload is kept.
+  const nodeId = useEditor((s) => s.selectedId);
+  const latestContent = (): NonNullable<FlowNode["content"]> => {
+    const n = useEditor.getState().nodes.find((x) => x.id === nodeId);
+    return (n?.data as FlowNodeData | undefined)?.flowNode.content ?? {};
+  };
+  const setImage = (imageUrl: string) => onChange({ content: { ...latestContent(), imageUrl: imageUrl || undefined } });
+  const setCardImage = (ci: number, imageUrl: string) => {
+    const now = latestContent();
+    onChange({ content: { ...now, cards: (now.cards ?? []).map((c, j) => (ci === j ? { ...c, imageUrl } : c)) } });
+  };
 
   return (
     <>
@@ -445,7 +469,7 @@ function SendMessageFields({ node, onChange }: { node: FlowNode; onChange: (patc
       </div>
       <div>
         <label className="label">Image (optional)</label>
-        <ImageField value={content.imageUrl ?? ""} onChange={(imageUrl) => setContent({ imageUrl: imageUrl || undefined })} />
+        <ImageField value={content.imageUrl ?? ""} onChange={setImage} />
       </div>
 
       <div className="stack">
@@ -509,7 +533,7 @@ function SendMessageFields({ node, onChange }: { node: FlowNode; onChange: (patc
               </div>
               <input className="input" placeholder="Title" value={card.title} onChange={(e) => setCard({ title: e.target.value })} />
               <input className="input" placeholder="Subtitle" value={card.subtitle ?? ""} onChange={(e) => setCard({ subtitle: e.target.value })} />
-              <ImageField compact value={card.imageUrl ?? ""} onChange={(imageUrl) => setCard({ imageUrl })} />
+              <ImageField compact value={card.imageUrl ?? ""} onChange={(imageUrl) => setCardImage(ci, imageUrl)} />
               {cardBtns.map((b, bi) => (
                 <Fragment key={bi}>
                   <div className="button-row">
@@ -813,6 +837,17 @@ function RandomizeFields({ node, onChange }: { node: FlowNode; onChange: (patch:
   const branches = node.branches ?? [{ key: "b0", weight: 50 }, { key: "b1", weight: 50 }];
   const set = (next: typeof branches) => onChange({ branches: next });
   const total = branches.reduce((s, b) => s + (b.weight || 0), 0) || 1;
+  const nodeId = useEditor((s) => s.selectedId);
+  const edges = useEditor((s) => s.edges);
+  const onEdgesChange = useEditor((s) => s.onEdgesChange);
+
+  // Dropping a path also drops its wire, so a later path that reuses the key starts unconnected.
+  const removeBranch = (i: number) => {
+    const key = branches[i].key;
+    const stale = edges.filter((e) => e.source === nodeId && e.sourceHandle === key);
+    if (stale.length) onEdgesChange(stale.map((e) => ({ type: "remove" as const, id: e.id })));
+    set(branches.filter((_, j) => j !== i));
+  };
 
   return (
     <div className="stack" style={{ gap: 12 }}>
@@ -830,7 +865,7 @@ function RandomizeFields({ node, onChange }: { node: FlowNode; onChange: (patch:
           />
           <span className="mono">{Math.round(((b.weight || 0) / total) * 100)}%</span>
           {branches.length > 2 && (
-            <button className="btn btn-quiet" onClick={() => set(branches.filter((_, j) => j !== i))}>Remove</button>
+            <button className="btn btn-quiet" onClick={() => removeBranch(i)}>Remove</button>
           )}
         </div>
       ))}
@@ -838,7 +873,12 @@ function RandomizeFields({ node, onChange }: { node: FlowNode; onChange: (patch:
         <button
           className="btn btn-quiet"
           disabled={branches.length >= 8}
-          onClick={() => set([...branches, { key: `b${branches.length}`, weight: 50 }])}
+          onClick={() => {
+            // Take the first unused key, so removing a middle path never leaves a duplicate.
+            const used = new Set(branches.map((b) => b.key));
+            const key = Array.from({ length: 8 }, (_, j) => `b${j}`).find((k) => !used.has(k));
+            if (key) set([...branches, { key, weight: 50 }]);
+          }}
         >
           Add path
         </button>

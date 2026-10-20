@@ -118,7 +118,7 @@ export const useEditor = create<EditorState>((set, get) => ({
 
   setStats: (stats, entered) => set({ stats, entered }),
   setIssues: (issues) => set({ issues }),
-  focus: (id) => set({ selectedId: id, focusReq: { id, n: (get().focusReq?.n ?? 0) + 1 } }),
+  focus: (id) => set({ selectedId: id, coalescingEdit: false, focusReq: { id, n: (get().focusReq?.n ?? 0) + 1 } }),
 
   checkpoint: (isEdit = false) => {
     // Coalesce a run of config edits into a single undo step.
@@ -315,7 +315,8 @@ export const useEditor = create<EditorState>((set, get) => ({
     });
   },
 
-  select: (id) => set({ selectedId: id }),
+  // A new selection ends the typing run, so undo never folds edits on two steps into one.
+  select: (id) => set({ selectedId: id, coalescingEdit: false }),
 
   markSaved: (rev) => {
     if (rev === undefined || rev === get().rev) set({ dirty: false });

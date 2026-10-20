@@ -196,6 +196,16 @@ export function SequenceEditor() {
     setEditing(null);
   }
 
+  // Escape closes the message drawer, unless the automation picker is open on top of it.
+  const closeRef = useRef(closeEditor);
+  closeRef.current = closeEditor;
+  useEffect(() => {
+    if (!editing || picking) return;
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && closeRef.current();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [editing, picking]);
+
   if (error) {
     return (
       <div className="stack" style={{ gap: 12 }}>
@@ -333,6 +343,7 @@ export function SequenceEditor() {
             </header>
             <div className="msg-drawer-body">
               <Composer
+                key={editStep.id}
                 blocks={toBlocks(editStep.content)}
                 onChange={(next: Block[]) => patchStep(editStep.id, { content: { blocks: next } })}
                 aside={
@@ -433,6 +444,8 @@ function SchedulePop({
                   aria-pressed={on}
                   onClick={() => {
                     const all = days.length ? days : [1, 2, 3, 4, 5, 6, 7];
+                    // An empty list means every day, so the last day can't be switched off.
+                    if (on && all.length === 1) return;
                     const next = on ? all.filter((x) => x !== n) : [...all, n].sort();
                     setDays(next.length === 7 ? [] : next);
                   }}

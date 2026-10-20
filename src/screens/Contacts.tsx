@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 import { relativeTime } from "../lib/time";
+import { firstSendAt } from "../lib/content";
 import { isComplete, matchContacts, matchingIds, type Condition } from "../lib/conditions";
 import { ConditionBuilder } from "../components/ConditionBuilder";
 import { ContactProfile } from "../components/ContactProfile";
@@ -407,11 +408,17 @@ export function Contacts() {
                     .in("contact_id", ids);
                   if (error) return { error };
                   const running = new Set((data ?? []).map((r) => r.contact_id));
-                  const now = new Date().toISOString();
                   const fresh = ids.filter((id) => !running.has(id));
                   if (!fresh.length) return { error: null };
+                  // The first message waits out its own delay, as when an automation subscribes.
+                  let next_send_at: string;
+                  try {
+                    next_send_at = await firstSendAt(seq);
+                  } catch (err) {
+                    return { error: err };
+                  }
                   return supabase.from("sequence_subscription").upsert(
-                    fresh.map((id) => ({ sequence_id: seq, contact_id: id, step: 0, next_send_at: now, status: "active" })),
+                    fresh.map((id) => ({ sequence_id: seq, contact_id: id, step: 0, next_send_at, status: "active" })),
                     { onConflict: "sequence_id,contact_id" },
                   );
                 }, 100)
@@ -625,7 +632,10 @@ function downloadCsv(list: Contact[]) {
   const keys = [...new Set(list.flatMap((c) => Object.keys(c.custom_fields ?? {})))].sort();
   const head = ["Name", "Username", "Instagram ID", "Subscribed", "Tags", "Assigned to", "Conversation", "Follows you", "Last interaction", "Contact since", ...keys];
   const cell = (v: unknown) => {
-    const s = v == null ? "" : String(v);
+    let s = v == null ? "" : String(v);
+    // A value a contact typed could start like a formula (=HYPERLINK…); a leading ' keeps
+    // Excel and Sheets from running it.
+    if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
     return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
   const lines = list.map((c) =>
@@ -644,7 +654,7 @@ function downloadCsv(list: Contact[]) {
     ].map(cell).join(","),
   );
   // The byte-order mark lets Excel read Arabic names correctly.
-  const blob = new Blob(["﻿" + [head.join(","), ...lines].join("\r\n")], { type: "text/csv;charset=utf-8" });
+  const blob = new Blob(["﻿" + [head.map(cell).join(","), ...lines].join("\r\n")], { type: "text/csv;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;

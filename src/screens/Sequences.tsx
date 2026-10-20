@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 import { Loader } from "../components/Loader";
@@ -96,7 +96,12 @@ export function Sequences() {
     setRows((r) => r.map((x) => (x.id === s.id ? { ...x, name } : x)));
   }
 
+  // A second click while a copy is being made would make a second copy.
+  const duplicating = useRef(false);
+
   async function duplicate(s: Sequence) {
+    if (duplicating.current) return;
+    duplicating.current = true;
     try {
       const { data: copy, error } = await supabase.from("sequence").insert({ name: `${s.name} (copy)` }).select("id").single();
       if (error) throw error;
@@ -112,6 +117,8 @@ export function Sequences() {
       load();
     } catch (err) {
       toast.error(err);
+    } finally {
+      duplicating.current = false;
     }
   }
 
@@ -166,7 +173,7 @@ export function Sequences() {
                 const t = totals[s.id];
                 const open = () => navigate(`/sequences/${s.id}`);
                 return (
-                  <tr key={s.id} onClick={open} tabIndex={0} onKeyDown={(e) => e.key === "Enter" && open()}>
+                  <tr key={s.id} onClick={open} tabIndex={0} onKeyDown={(e) => e.key === "Enter" && e.target === e.currentTarget && open()}>
                     <td className="col-menu">
                       <RowMenu items={[
                         { label: "Rename", onSelect: () => rename(s) },

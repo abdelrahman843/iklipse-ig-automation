@@ -491,15 +491,27 @@ function BotFieldsPanel() {
 
   const clean = key.trim().toLowerCase().replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "");
 
-  async function save(k: string, v: string) {
+  /** True when it landed, so the add form only clears what was actually saved. */
+  async function save(k: string, v: string): Promise<boolean> {
     const { error } = await supabase.from("bot_field").upsert({ key: k, value: v, updated_at: new Date().toISOString() }, { onConflict: "key" });
-    if (error) return toast.error(error);
+    if (error) {
+      toast.error(error);
+      return false;
+    }
     toast.success(`Bot field “${k}” saved`);
     load();
+    return true;
+  }
+
+  async function add() {
+    if (clean && (await save(clean, value))) {
+      setKey("");
+      setValue("");
+    }
   }
 
   async function edit(r: { key: string; value: string }) {
-    const next = window.prompt(`New value for ${r.key}`, r.value);
+    const next = await promptDialog({ title: `New value for ${r.key}`, initial: r.value, confirmLabel: "Save" });
     if (next !== null && next !== r.value) save(r.key, next);
   }
 
@@ -526,8 +538,8 @@ function BotFieldsPanel() {
     >
       <div className="st-add">
         <input className="input" placeholder="New bot field, e.g. promo_code" value={key} onChange={(e) => setKey(e.target.value)} />
-        <input className="input" placeholder="Value" value={value} onChange={(e) => setValue(e.target.value)} onKeyDown={(e) => e.key === "Enter" && clean && save(clean, value).then(() => { setKey(""); setValue(""); })} />
-        <button className="btn btn-primary" disabled={!clean} onClick={() => save(clean, value).then(() => { setKey(""); setValue(""); })}>Add Field</button>
+        <input className="input" placeholder="Value" value={value} onChange={(e) => setValue(e.target.value)} onKeyDown={(e) => e.key === "Enter" && add()} />
+        <button className="btn btn-primary" disabled={!clean} onClick={add}>Add Field</button>
       </div>
       {rows.length === 0 ? (
         <p className="mc-empty" style={{ padding: "14px 0 0" }}>No bot fields yet.</p>

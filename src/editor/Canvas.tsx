@@ -139,6 +139,12 @@ function ConnectMenuCard({
     defs: Object.values(NODE_DEFS).filter((d) => d.addable && d.category === cat),
   })).filter((g) => g.defs.length > 0);
 
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   // Keep the menu inside the viewport near the drop point.
   const left = Math.min(menu.x, window.innerWidth - 288);
   const top = Math.min(menu.y, window.innerHeight - 360);

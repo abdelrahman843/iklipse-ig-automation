@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useEditor } from "./store";
 import { CATEGORY_ORDER, NODE_DEFS } from "./nodeDefs";
 import { NODE_ICON } from "./nodes/icons";
@@ -10,6 +10,13 @@ export function NodePicker() {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const addNode = useEditor((s) => s.addNode);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open]);
 
   const q = query.trim().toLowerCase();
   const groups = CATEGORY_ORDER.map((cat) => ({

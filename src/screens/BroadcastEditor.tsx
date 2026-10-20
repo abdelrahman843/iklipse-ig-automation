@@ -83,6 +83,19 @@ export function BroadcastEditor() {
     supabase.from("flow").select("name").eq("id", b.flow_id).maybeSingle().then(({ data }) => setFlowName(data?.name ?? null));
   }, [b?.flow_id]);
 
+  // Escape closes the recipient preview first, then the schedule popup.
+  const overlay = peek ? "peek" : scheduling ? "schedule" : null;
+  useEffect(() => {
+    if (!overlay) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (overlay === "peek") setPeek(null);
+      else setScheduling(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [overlay]);
+
   // Recount the audience whenever its conditions change.
   const audienceKey = JSON.stringify(b?.audience ?? []);
   useEffect(() => {
@@ -104,6 +117,10 @@ export function BroadcastEditor() {
     saving.current = saving.current.then(async () => {
       const { error } = await supabase.from("broadcast").update(p.patch).eq("id", rowId).eq("status", "draft");
       if (error) {
+        // Put the lost edit back under anything typed since, so the next save retries it.
+        // No timer: a failing save shouldn't retry (and toast) on its own every 600 ms.
+        const newer = pending.current;
+        pending.current = { patch: { ...p.patch, ...(newer?.patch ?? {}) }, timer: newer?.timer ?? 0 };
         setSaveState("failed");
         toast.error(error);
         return false;
@@ -116,7 +133,7 @@ export function BroadcastEditor() {
 
   function patch(p: Partial<Broadcast>) {
     if (!b || b.status !== "draft") return;
-    setB({ ...b, ...p });
+    setB((cur) => (cur ? { ...cur, ...p } : cur));
     setSaveState("saving");
     const merged = { ...(pending.current?.patch ?? {}), ...p };
     if (pending.current) clearTimeout(pending.current.timer);
@@ -137,11 +154,12 @@ export function BroadcastEditor() {
   const blocks = toBlocks(b.content);
   const problem = b.flow_id ? null : blocksProblem(blocks);
 
-  async function sendAt(when: Date) {
+  async function sendAt(when: Date, immediate = false) {
     if (!b) return;
     if (problem) return toast.error(problem);
-    const now = when.getTime() <= Date.now() + 30_000;
-    if (!now && when.getTime() < Date.now()) return toast.error("Pick a time in the future.");
+    // A scheduled time that has already passed is a mistake, not a request to send right away.
+    if (!immediate && !(when.getTime() > Date.now() + 30_000)) return toast.error("Pick a time in the future.");
+    const now = immediate;
     const ok = await confirmDialog({
       title: now ? `Send "${b.name}" now?` : `Schedule "${b.name}"?`,
       body: now
@@ -171,18 +189,21 @@ export function BroadcastEditor() {
   }
 
   async function copyAndEdit() {
-    if (!b) return;
+    if (!b || busy) return;
+    setBusy(true);
     const { data, error } = await supabase
       .from("broadcast")
       .insert({ name: `${b.name} (copy)`, content: b.content, audience: b.audience, flow_id: b.flow_id })
       .select("id")
       .single();
+    setBusy(false);
     if (error) return toast.error(error);
     navigate(`/broadcasts/${data.id}`);
   }
 
   async function unschedule() {
-    if (!b) return;
+    if (!b || busy) return;
+    setBusy(true);
     const { data, error } = await supabase
       .from("broadcast")
       .update({ status: "draft", scheduled_at: null })
@@ -190,6 +211,7 @@ export function BroadcastEditor() {
       .eq("status", "scheduled")
       .select("*")
       .maybeSingle();
+    setBusy(false);
     if (error) return toast.error(error);
     if (!data) return toast.info("It already started sending.");
     setB(data as Broadcast);
@@ -201,7 +223,7 @@ export function BroadcastEditor() {
   const actions: ReactNode = editable ? (
     <>
       <SaveState state={saveState} />
-      <button className={`btn btn-primary ${busy ? "is-busy" : ""}`} disabled={busy} onClick={() => sendAt(new Date())}>
+      <button className={`btn btn-primary ${busy ? "is-busy" : ""}`} disabled={busy} onClick={() => sendAt(new Date(), true)}>
         Send Now
       </button>
       <div className="pop-anchor">
@@ -229,10 +251,10 @@ export function BroadcastEditor() {
   ) : b.status === "scheduled" ? (
     <>
       <span className="mono">Sends {b.scheduled_at ? new Date(b.scheduled_at).toLocaleString() : "soon"}</span>
-      <button className="btn" onClick={unschedule}>Cancel schedule</button>
+      <button className={`btn ${busy ? "is-busy" : ""}`} disabled={busy} onClick={unschedule}>Cancel schedule</button>
     </>
   ) : (
-    <button className="btn btn-primary" onClick={copyAndEdit}>Copy &amp; Edit</button>
+    <button className={`btn btn-primary ${busy ? "is-busy" : ""}`} disabled={busy} onClick={copyAndEdit}>Copy &amp; Edit</button>
   );
 
   return (

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 export interface Option {
   value: string;
@@ -19,6 +19,18 @@ export function Select({
 }) {
   const [open, setOpen] = useState(false);
   const current = options.find((o) => o.value === value);
+
+  // Escape closes the list. Caught first and stopped, so a dialog the dropdown sits in stays open.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.stopPropagation();
+      setOpen(false);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [open]);
 
   return (
     <div className="dd">

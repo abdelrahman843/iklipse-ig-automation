@@ -145,3 +145,19 @@ export function pct(part: number, whole: number): string {
   if (!whole) return "—";
   return `${part} (${Math.round((part / whole) * 1000) / 10}%)`;
 }
+
+/**
+ * When a new sequence subscription's first message is due: now plus that message's own delay,
+ * as the engine's "Subscribe to sequence" action does. Throws if the step can't be read.
+ */
+export async function firstSendAt(sequenceId: string): Promise<string> {
+  const { data, error } = await supabase
+    .from("sequence_step")
+    .select("delay_seconds")
+    .eq("sequence_id", sequenceId)
+    .order("sort")
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+  return new Date(Date.now() + Number(data?.delay_seconds ?? 0) * 1000).toISOString();
+}
