@@ -8,3 +8,4 @@ migrate.env
 *.local.sql
 *.stackdump
 *.tsbuildinfo
+.supabase-token
