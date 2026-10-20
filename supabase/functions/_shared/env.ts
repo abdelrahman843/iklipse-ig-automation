@@ -29,8 +29,3 @@ export const IG_REDIRECT_URI = () => env("IG_REDIRECT_URI");
 /** Where to send the browser back to after connecting. */
 export const APP_URL = () => env("APP_URL", "http://localhost:5173");
 
-/** Shared secret the admin-accounts function requires (header x-admin-key). Only n8n holds it. */
-export const ADMIN_API_KEY = () => env("ADMIN_API_KEY");
-
-/** Logins are usernames; Supabase Auth stores each as <username>@ this domain. ".invalid" is a reserved TLD: no one can ever receive mail there, so a password-reset email can never reach anyone. */
-export const LOGIN_DOMAIN = () => env("LOGIN_DOMAIN", "login.iklipse.invalid");

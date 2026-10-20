@@ -9,4 +9,4 @@ migrate.env
 *.stackdump
 *.tsbuildinfo
 .supabase-token
-.n8n-admin-key
+.claude/settings.local.json
